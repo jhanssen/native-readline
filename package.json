@@ -1,0 +1,17 @@
+{
+  "name": "node-readline",
+  "version": "1.0.0",
+  "description": "",
+  "main": "test.js",
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "build-debug": "node-gyp rebuild --debug",
+    "start": "node ./test.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "gypfile": true,
+  "devDependencies": {
+    "nan": "^2.5.1"
+  }
+}
