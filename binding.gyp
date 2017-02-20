@@ -9,7 +9,7 @@
         "-L/usr/local/Cellar/readline/7.0/lib", "-lreadline"
       ],
       "target_name": "native-readline",
-      "sources": [ "readline.cpp", "Redirector.cpp", "uvhelpers.cpp" ]
+      "sources": [ "readline.cpp", "Redirector.cpp", "utils.cpp" ]
     }
   ]
 }

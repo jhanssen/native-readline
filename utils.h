@@ -1,5 +1,5 @@
-#ifndef UV_HELPERS_H
-#define UV_HELPERS_H
+#ifndef UTILS_H
+#define UTILS_H
 
 #include <nan.h>
 #include <assert.h>

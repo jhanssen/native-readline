@@ -3,7 +3,7 @@
 #include <sys/ioctl.h>
 #include <readline/readline.h>
 #include <readline/history.h>
-#include "uvhelpers.h"
+#include "utils.h"
 #include "Redirector.h"
 #include <errno.h>
 
