@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "node-gyp rebuild",
-    "build-debug": "node-gyp rebuild --debug",
+    "build-debug": "node-gyp rebuild --debug"
   },
   "author": "Jan Erik Hanssen",
   "license": "MIT",
