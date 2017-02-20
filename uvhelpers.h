@@ -17,13 +17,12 @@ class Mutex
 {
 public:
     Mutex()
-        : mLocked(false)
     {
         uv_mutex_init(&mMutex);
     }
     ~Mutex()
     {
-        if (mLocked)
+        if (tLocked)
             unlock();
         uv_mutex_destroy(&mMutex);
     }
@@ -31,20 +30,20 @@ public:
     void lock()
     {
         uv_mutex_lock(&mMutex);
-        mLocked = true;
+        tLocked = true;
     }
     void unlock()
     {
-        assert(mLocked);
-        mLocked = false;
+        assert(tLocked);
+        tLocked = false;
         uv_mutex_unlock(&mMutex);
     }
 
-    bool locked() const { return mLocked; }
+    bool locked() const { return tLocked; }
 
 private:
     uv_mutex_t mMutex;
-    bool mLocked;
+    thread_local static bool tLocked;
 
     friend class Condition;
 };
@@ -81,8 +80,7 @@ private:
 class Condition
 {
 public:
-    Condition(Mutex* mutex)
-        : mMutex(mutex)
+    Condition()
     {
         uv_cond_init(&mCond);
     }
@@ -92,14 +90,14 @@ public:
         uv_cond_destroy(&mCond);
     }
 
-    void wait()
+    void wait(Mutex* mutex)
     {
-        uv_cond_wait(&mCond, &mMutex->mMutex);
+        uv_cond_wait(&mCond, &mutex->mMutex);
     }
 
-    void waitUntil(uint64_t timeout)
+    void waitUntil(Mutex* mutex, uint64_t timeout)
     {
-        uv_cond_timedwait(&mCond, &mMutex->mMutex, timeout);
+        uv_cond_timedwait(&mCond, &mutex->mMutex, timeout);
     }
 
     void signal()
@@ -113,7 +111,6 @@ public:
     }
 
 private:
-    Mutex* mMutex;
     uv_cond_t mCond;
 };
 
