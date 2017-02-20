@@ -6,6 +6,8 @@
 #include "uvhelpers.h"
 #include "Redirector.h"
 
+// #define LOG
+
 struct State
 {
     State() : started(false), stopped(false) { }
@@ -16,8 +18,10 @@ struct State
     uv_thread_t thread;
     int wakeup[2];
     Redirector redirector;
-    FILE* log;
     std::string prompt;
+#ifdef LOG
+    FILE* log;
+#endif
 
     Mutex mutex;
     bool stopped;
@@ -45,7 +49,9 @@ static State state;
 bool State::init()
 {
     state.iso = v8::Isolate::GetCurrent();
-    state.log = fopen("/tmp/jsh.log", "w");
+#ifdef LOG
+    state.log = fopen("/tmp/nrl.log", "w");
+#endif
 
     int r = pipe(state.wakeup);
     if (r == -1) {
@@ -70,7 +76,9 @@ void State::cleanup()
     if (state.wakeup[1] != -1)
         close(state.wakeup[1]);
 
+#ifdef LOG
     fclose(state.log);
+#endif
 }
 
 static void handleOut(int fd, const std::function<void(const char*, int)>& write)
@@ -79,12 +87,6 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
     char* saved_line;
     int saved_point;
     auto save = [&saved, &saved_line, &saved_point]() {
-        // saved_point = rl_point;
-        // saved_line = rl_copy_text(0, rl_end);
-        // rl_set_prompt("");
-        // rl_replace_line("", 0);
-        // rl_redisplay();
-
         saved_point = rl_point;
         saved_line = rl_copy_text(0, rl_end);
         rl_save_prompt();
@@ -94,12 +96,6 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
         saved = true;
     };
     auto restore = [&saved_line, &saved_point]() {
-        // rl_set_prompt(state.prompt.c_str());
-        // rl_replace_line(saved_line, 0);
-        // rl_point = saved_point;
-        // rl_redisplay();
-        // free(saved_line);
-
         rl_restore_prompt();
         rl_replace_line(saved_line, 0);
         rl_point = saved_point;
@@ -126,8 +122,10 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
                 save();
             write(buf, r);
 
+#ifdef LOG
             fprintf(state.log, "wrote '%s' \n", std::string(buf, r).c_str());
             fflush(state.log);
+#endif
         }
     }
     if (saved)
