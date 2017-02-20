@@ -9,8 +9,12 @@ function read(str)
 
 function complete(data, cb)
 {
-    console.log("complete", data);
-    cb();
+    if (data.buffer.substr(data.start, data.end - data.start) == "foo") {
+        cb(["foobar", "foobaz"]);
+    } else {
+        cb();
+        console.log("complete", data);
+    }
 }
 
 rl.start(read, complete);

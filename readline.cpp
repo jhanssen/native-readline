@@ -40,6 +40,7 @@ struct State
         uv_async_t async;
 
         struct {
+            const char* buffer;
             const char* text;
             int start, end;
         } pending;
@@ -160,13 +161,24 @@ void State::run(void* arg)
     auto completer = [](const char* text, int start, int end) -> char** {
         rl_attempted_completion_over = 1;
 
-        state.redirector.writeStdout("precomplete\n");
+        //state.redirector.writeStdout("precomplete\n");
         MutexLocker locker(&state.completion.mutex);
-        state.completion.pending = { text, start, end };
+        state.completion.pending = { rl_line_buffer, text, start, end };
         uv_async_send(&state.completion.async);
         state.completion.condition.wait(&state.completion.mutex);
-        state.redirector.writeStdout("postcomplete\n");
+        //state.redirector.writeStdout("postcomplete\n");
 
+        // loop through results and make a char**
+        if (!state.completion.results.empty()) {
+            char** array = static_cast<char**>(malloc((2 + state.completion.results.size()) * sizeof(*array)));
+            array[0] = strdup(longest_common_prefix(text, state.completion.results).c_str());
+            size_t ptr = 1;
+            for (const auto& m : state.completion.results) {
+                array[ptr++] = strdup(m.c_str());
+            }
+            array[ptr] = nullptr;
+            return array;
+        }
         return nullptr;
     };
 
@@ -287,7 +299,7 @@ NAN_METHOD(start) {
 
             MutexLocker locker(&state.completion.mutex);
             state.completion.results = results;
-            state.redirector.writeStdout("signaling\n");
+            //state.redirector.writeStdout("signaling\n");
             state.completion.condition.signal();
         };
         auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
@@ -319,6 +331,7 @@ NAN_METHOD(start) {
 
             {
                 MutexLocker locker(&state.completion.mutex);
+                data->Set(makeValue("buffer"), makeValue(std::string(state.completion.pending.buffer)));
                 data->Set(makeValue("text"), makeValue(std::string(state.completion.pending.text)));
                 data->Set(makeValue("start"), v8::Integer::New(state.iso,state.completion.pending.start));
                 data->Set(makeValue("end"), v8::Integer::New(state.iso,state.completion.pending.end));

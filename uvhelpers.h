@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <queue>
 #include <errno.h>
+#include <string>
+#include <vector>
 
 #define EINTRWRAP(var, op)                      \
     do {                                        \
@@ -163,5 +165,7 @@ inline v8::Handle<v8::Value> makeValue(const std::string& str)
         return scope.Escape(v8::Handle<v8::Value>());
     return scope.Escape(v8str);
 }
+
+std::string longest_common_prefix(const std::string& s, const std::vector<std::string>& candidates);
 
 #endif
