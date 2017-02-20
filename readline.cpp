@@ -5,6 +5,7 @@
 #include <readline/history.h>
 #include "uvhelpers.h"
 #include "Redirector.h"
+#include <errno.h>
 
 // #define LOG
 
@@ -35,7 +36,17 @@ struct State
 
     struct {
         Nan::Persistent<v8::Function> function;
+        Nan::Persistent<v8::Function> callback;
         uv_async_t async;
+
+        struct {
+            const char* text;
+            int start, end;
+        } pending;
+        std::vector<std::string> results;
+
+        Mutex mutex;
+        Condition condition;
     } completion;
 
     static void run(void* arg);
@@ -146,9 +157,22 @@ void State::run(void* arg)
         state.readline.lines.push(line);
         uv_async_send(&state.readline.async);
     };
+    auto completer = [](const char* text, int start, int end) -> char** {
+        rl_attempted_completion_over = 1;
+
+        state.redirector.writeStdout("precomplete\n");
+        MutexLocker locker(&state.completion.mutex);
+        state.completion.pending = { text, start, end };
+        uv_async_send(&state.completion.async);
+        state.completion.condition.wait(&state.completion.mutex);
+        state.redirector.writeStdout("postcomplete\n");
+
+        return nullptr;
+    };
 
     rl_outstream = state.redirector.stdoutFile();
     rl_callback_handler_install(state.prompt.c_str(), handler);
+    rl_attempted_completion_function = completer;
 
     const int stdoutfd = state.redirector.stdout();
     const int stderrfd = state.redirector.stderr();
@@ -249,6 +273,27 @@ NAN_METHOD(start) {
     state.readline.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[0])));
     state.completion.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[1])));
 
+    {
+        auto callback = [](const v8::FunctionCallbackInfo<v8::Value>& info) {
+            // array of strings, put into results and notify our condition
+            std::vector<std::string> results;
+
+            if (info.Length() > 0 && info[0]->IsArray()) {
+                v8::Handle<v8::Array> array = v8::Handle<v8::Array>::Cast(info[0]);
+                for (uint32_t i = 0; i < array->Length(); ++i) {
+                    results.push_back(*v8::String::Utf8Value(array->Get(i)));
+                }
+            }
+
+            MutexLocker locker(&state.completion.mutex);
+            state.completion.results = results;
+            state.redirector.writeStdout("signaling\n");
+            state.completion.condition.signal();
+        };
+        auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
+        state.completion.callback.Reset(Nan::Persistent<v8::Function>(cb.ToLocalChecked()));
+    }
+
     auto cb = [](uv_async_t* async) {
         v8::Isolate::Scope isolateScope(state.iso);
         Nan::HandleScope scope;
@@ -265,6 +310,25 @@ NAN_METHOD(start) {
                 f->Call(f, 1, &value);
             }
         } else if (async == &state.completion.async) {
+            auto iso = v8::Isolate::GetCurrent();
+            v8::Handle<v8::Function> f = v8::Local<v8::Function>::New(iso, state.completion.function);
+            v8::Handle<v8::Function> cb = v8::Local<v8::Function>::New(iso, state.completion.callback);
+
+            std::vector<v8::Handle<v8::Value> > values;
+            v8::Handle<v8::Object> data = v8::Object::New(iso);
+
+            {
+                MutexLocker locker(&state.completion.mutex);
+                data->Set(makeValue("text"), makeValue(std::string(state.completion.pending.text)));
+                data->Set(makeValue("start"), v8::Integer::New(state.iso,state.completion.pending.start));
+                data->Set(makeValue("end"), v8::Integer::New(state.iso,state.completion.pending.end));
+            }
+
+            values.push_back(data);
+            values.push_back(cb);
+
+            // ask js, pass a callback
+            f->Call(f, values.size(), &values[0]);
         } else {
         }
     };

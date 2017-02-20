@@ -7,8 +7,10 @@ function read(str)
     console.log("got", str);
 }
 
-function complete()
+function complete(data, cb)
 {
+    console.log("complete", data);
+    cb();
 }
 
 rl.start(read, complete);
