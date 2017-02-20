@@ -1,12 +1,25 @@
 {
+  "variables": {
+    "conditions": [
+      # Define variables that points at OS-specific paths.
+      ["OS=='mac'", {
+        "os_include": "/usr/local/opt/readline/include",
+        "os_libs": "-L/usr/local/opt/readline/lib"
+      }, {
+        "os_include": "",
+        "os_libs": ""
+      }],
+    ],
+  },
   "targets": [
    {
       "include_dirs": [
-        "/usr/local/Cellar/readline/7.0/include/",
+        "<(os_include)",
         "<!(node -e \"require('nan')\")"
       ],
       "libraries": [
-        "-L/usr/local/Cellar/readline/7.0/lib", "-lreadline"
+        "<(os_libs)",
+        "-lreadline"
       ],
       "target_name": "native-readline",
       "sources": [ "readline.cpp", "Redirector.cpp", "utils.cpp" ]

@@ -1,17 +1,17 @@
 {
-  "name": "node-readline",
+  "name": "native-readline",
   "version": "1.0.0",
-  "description": "",
-  "main": "test.js",
+  "description": "Native libreadline support",
+  "main": "index.js",
   "scripts": {
     "build": "node-gyp rebuild",
     "build-debug": "node-gyp rebuild --debug",
-    "start": "node ./test.js"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "Jan Erik Hanssen",
+  "license": "MIT",
   "gypfile": true,
-  "devDependencies": {
+  "dependencies": {
+    "bindings": "^1.2.1",
     "nan": "^2.5.1"
   }
 }
