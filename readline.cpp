@@ -159,6 +159,7 @@ void State::run(void* arg)
         uv_async_send(&state.readline.async);
     };
     auto completer = [](const char* text, int start, int end) -> char** {
+        // ### if we want file completion, just return nullptr before setting this variable
         rl_attempted_completion_over = 1;
 
         //state.redirector.writeStdout("precomplete\n");
