@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "Redirector.h"
 #include <errno.h>
+#include <functional>
 
 // #define LOG
 
