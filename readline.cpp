@@ -218,7 +218,7 @@ void State::run(void* arg)
         max = STDIN_FILENO;
     if (stdoutfd > max)
         max = stdoutfd;
-    if (stderrfd < max)
+    if (stderrfd > max)
         max = stderrfd;
 
     const auto stdoutfunc = std::bind(&Redirector::writeStdout, &state.redirector, std::placeholders::_1, std::placeholders::_2);
