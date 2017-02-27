@@ -229,7 +229,8 @@ void State::run(void* arg)
         // we need to wait on both wakeupPipe[0] and stdin
         FD_ZERO(&rdset);
         FD_SET(state.wakeupPipe[0], &rdset);
-        FD_SET(STDIN_FILENO, &rdset);
+        if (!state.paused)
+            FD_SET(STDIN_FILENO, &rdset);
         FD_SET(stdoutfd, &rdset);
         FD_SET(stderrfd, &rdset);
         const int r = select(max + 1, &rdset, 0, 0, 0);
