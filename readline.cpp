@@ -12,13 +12,14 @@
 
 struct State
 {
-    State() : started(false), stopped(false) { }
+    State() : started(false), paused(false), stopped(false) { }
 
     v8::Isolate* iso;
 
     bool started;
+    bool paused;
     uv_thread_t thread;
-    int wakeup[2];
+    int wakeupPipe[2];
     Redirector redirector;
     std::string prompt;
 #ifdef LOG
@@ -55,6 +56,16 @@ struct State
 
     bool init();
     void cleanup();
+
+    enum WakeupReason {
+        WakeupStop,
+        WakeupPause,
+        WakeupResume,
+        WakeupPrompt
+    };
+    void wakeup(WakeupReason reason);
+    uv_async_t pauseAsync, resumeAsync, promptAsync;
+    Nan::Callback pauseCb, resumeCb, promptCb;
 };
 
 static State state;
@@ -66,32 +77,42 @@ bool State::init()
     state.log = fopen("/tmp/nrl.log", "w");
 #endif
 
-    int r = pipe(state.wakeup);
+    int r = pipe(state.wakeupPipe);
     if (r == -1) {
         // badness
-        state.wakeup[0] = state.wakeup[1] = -1;
+        state.wakeupPipe[0] = state.wakeupPipe[1] = -1;
         return false;
     }
-    r = fcntl(state.wakeup[0], F_GETFL);
+    r = fcntl(state.wakeupPipe[0], F_GETFL);
     if (r == -1) {
         // horribleness
         return false;
     }
-    fcntl(state.wakeup[0], F_SETFL, r | O_NONBLOCK);
+    fcntl(state.wakeupPipe[0], F_SETFL, r | O_NONBLOCK);
 
     return true;
 }
 
 void State::cleanup()
 {
-    if (state.wakeup[0] != -1)
-        close(state.wakeup[0]);
-    if (state.wakeup[1] != -1)
-        close(state.wakeup[1]);
+    wakeup(WakeupStop);
+    uv_thread_join(&state.thread);
+
+    if (state.wakeupPipe[0] != -1)
+        close(state.wakeupPipe[0]);
+    if (state.wakeupPipe[1] != -1)
+        close(state.wakeupPipe[1]);
 
 #ifdef LOG
     fclose(state.log);
 #endif
+}
+
+void State::wakeup(WakeupReason reason)
+{
+    int e;
+    char r = reason;
+    EINTRWRAP(e, ::write(state.wakeupPipe[1], &r, 1));
 }
 
 static void handleOut(int fd, const std::function<void(const char*, int)>& write)
@@ -131,7 +152,7 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
             // done?
             break;
         } else {
-            if (!saved)
+            if (!saved && !state.paused)
                 save();
             write(buf, r);
 
@@ -192,7 +213,7 @@ void State::run(void* arg)
     const int stderrfd = state.redirector.stderr();
 
     fd_set rdset;
-    int max = state.wakeup[0];
+    int max = state.wakeupPipe[0];
     if (STDIN_FILENO > max)
         max = STDIN_FILENO;
     if (stdoutfd > max)
@@ -205,9 +226,9 @@ void State::run(void* arg)
 
     //uv_loop_t* loop = static_cast<uv_loop_t*>(arg);
     for (;;) {
-        // we need to wait on both wakeup[0] and stdin
+        // we need to wait on both wakeupPipe[0] and stdin
         FD_ZERO(&rdset);
-        FD_SET(state.wakeup[0], &rdset);
+        FD_SET(state.wakeupPipe[0], &rdset);
         FD_SET(STDIN_FILENO, &rdset);
         FD_SET(stdoutfd, &rdset);
         FD_SET(stderrfd, &rdset);
@@ -216,15 +237,44 @@ void State::run(void* arg)
             // boo
             break;
         }
-        if (FD_ISSET(state.wakeup[0], &rdset)) {
+        if (FD_ISSET(state.wakeupPipe[0], &rdset)) {
             // do stuff
             // read everything on our pipe
             char c, r;
+            bool stopped = false;
             for (;;) {
-                EINTRWRAP(r, read(state.wakeup[0], &c, 1));
+                EINTRWRAP(r, read(state.wakeupPipe[0], &c, 1));
                 if (r == -1)
                     break;
+                if (r == 1) {
+                    switch (c) {
+                    case WakeupStop:
+                        stopped = true;
+                        break;
+                    case WakeupPause:
+                        if (!state.paused) {
+                            state.paused = true;
+                            rl_callback_handler_remove();
+                        }
+                        uv_async_send(&state.pauseAsync);
+                        break;
+                    case WakeupResume:
+                        if (state.paused) {
+                            state.paused = false;
+                            rl_callback_handler_install(state.prompt.c_str(), handler);
+                        }
+                        uv_async_send(&state.resumeAsync);
+                        break;
+                    case WakeupPrompt:
+                        if (!state.paused)
+                            rl_redisplay();
+                        uv_async_send(&state.promptAsync);
+                        break;
+                    }
+                }
             }
+            if (stopped)
+                break;
         }
         if (FD_ISSET(stdoutfd, &rdset)) {
             handleOut(stdoutfd, stdoutfunc);
@@ -232,7 +282,7 @@ void State::run(void* arg)
         if (FD_ISSET(stderrfd, &rdset)) {
             handleOut(stderrfd, stderrfunc);
         }
-        if (FD_ISSET(STDIN_FILENO, &rdset)) {
+        if (FD_ISSET(STDIN_FILENO, &rdset) && !state.paused) {
             // read until we have nothing more to read
             if (r == -1) {
                 // ugh
@@ -344,13 +394,54 @@ NAN_METHOD(start) {
 
             // ask js, pass a callback
             f->Call(f, values.size(), &values[0]);
+        } else if (async == &state.pauseAsync) {
+            state.pauseCb.Call(0, 0);
+            state.pauseCb.Reset();
+        } else if (async == &state.resumeAsync) {
+            state.resumeCb.Call(0, 0);
+            state.resumeCb.Reset();
+        } else if (async == &state.promptAsync) {
+            state.promptCb.Call(0, 0);
+            state.promptCb.Reset();
         } else {
         }
     };
 
     uv_async_init(uv_default_loop(), &state.readline.async, cb);
     uv_async_init(uv_default_loop(), &state.completion.async, cb);
+
+    uv_async_init(uv_default_loop(), &state.pauseAsync, cb);
+    uv_async_init(uv_default_loop(), &state.resumeAsync, cb);
+    uv_async_init(uv_default_loop(), &state.promptAsync, cb);
+
     uv_thread_create(&state.thread, State::run, 0);
+}
+
+NAN_METHOD(pause) {
+    if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.pauseCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.wakeup(State::WakeupPause);
+    } else {
+        Nan::ThrowError("pause takes a function callback");
+    }
+}
+
+NAN_METHOD(resume) {
+    if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.resumeCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.wakeup(State::WakeupResume);
+    } else {
+        Nan::ThrowError("resume takes a function callback");
+    }
+}
+
+NAN_METHOD(prompt) {
+    if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.promptCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.wakeup(State::WakeupPrompt);
+    } else {
+        Nan::ThrowError("prompt takes a function callback");
+    }
 }
 
 NAN_METHOD(stop) {
@@ -360,6 +451,9 @@ NAN_METHOD(stop) {
 NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, start);
     NAN_EXPORT(target, stop);
+    NAN_EXPORT(target, pause);
+    NAN_EXPORT(target, resume);
+    NAN_EXPORT(target, prompt);
 }
 
 NODE_MODULE(nativeReadline, Initialize)
