@@ -449,12 +449,30 @@ NAN_METHOD(stop) {
     state.cleanup();
 }
 
+NAN_METHOD(log) {
+    const auto len = info.Length();
+    for (int i = 0; i < len; ++i) {
+        Nan::Utf8String str(info[i]);
+        fprintf(stdout, "%s%s", *str, i + 1 < len ? " " : "");
+    }
+}
+
+NAN_METHOD(error) {
+    const auto len = info.Length();
+    for (int i = 0; i < len; ++i) {
+        Nan::Utf8String str(info[i]);
+        fprintf(stderr, "%s%s", *str, i + 1 < len ? " " : "");
+    }
+}
+
 NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, start);
     NAN_EXPORT(target, stop);
     NAN_EXPORT(target, pause);
     NAN_EXPORT(target, resume);
     NAN_EXPORT(target, prompt);
+    NAN_EXPORT(target, log);
+    NAN_EXPORT(target, error);
 }
 
 NODE_MODULE(nativeReadline, Initialize)
