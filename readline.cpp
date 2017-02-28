@@ -225,6 +225,7 @@ void State::run(void* arg)
     const auto stderrfunc = std::bind(&Redirector::writeStderr, &state.redirector, std::placeholders::_1, std::placeholders::_2);
 
     //uv_loop_t* loop = static_cast<uv_loop_t*>(arg);
+    bool pendingPause = false;
     for (;;) {
         // we need to wait on both wakeupPipe[0] and stdin
         FD_ZERO(&rdset);
@@ -253,11 +254,7 @@ void State::run(void* arg)
                         stopped = true;
                         break;
                     case WakeupPause:
-                        if (!state.paused) {
-                            state.paused = true;
-                            rl_callback_handler_remove();
-                        }
-                        uv_async_send(&state.pauseAsync);
+                        pendingPause = true;
                         break;
                     case WakeupResume:
                         if (state.paused) {
@@ -304,6 +301,15 @@ void State::run(void* arg)
             }
             if (error)
                 break;
+        }
+
+        if (pendingPause) {
+            if (!state.paused) {
+                state.paused = true;
+                rl_callback_handler_remove();
+            }
+            uv_async_send(&state.pauseAsync);
+            pendingPause = false;
         }
 
         {
