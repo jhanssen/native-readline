@@ -12,7 +12,7 @@
 
 struct State
 {
-    State() : started(false), paused(false), stopped(false) { }
+    State() : started(false), paused(false), stopped(false), savedLine(0), savedPoint(0) { }
 
     v8::Isolate* iso;
 
@@ -66,6 +66,13 @@ struct State
     void wakeup(WakeupReason reason);
     uv_async_t pauseAsync, resumeAsync, promptAsync;
     Nan::Callback pauseCb, resumeCb, promptCb;
+
+    // pause state
+    char* savedLine;
+    int savedPoint;
+
+    void saveState();
+    void restoreState();
 };
 
 static State state;
@@ -115,27 +122,32 @@ void State::wakeup(WakeupReason reason)
     EINTRWRAP(e, ::write(state.wakeupPipe[1], &r, 1));
 }
 
+void State::saveState()
+{
+    if (state.savedLine)
+        return;
+    state.savedPoint = rl_point;
+    state.savedLine = rl_copy_text(0, rl_end);
+    rl_save_prompt();
+    rl_replace_line("", 0);
+    rl_redisplay();
+}
+
+void State::restoreState()
+{
+    if (!state.savedLine)
+        return;
+    rl_restore_prompt();
+    rl_replace_line(state.savedLine, 0);
+    rl_point = state.savedPoint;
+    rl_redisplay();
+    free(state.savedLine);
+    state.savedLine = 0;
+}
+
 static void handleOut(int fd, const std::function<void(const char*, int)>& write)
 {
     bool saved = false;
-    char* saved_line;
-    int saved_point;
-    auto save = [&saved, &saved_line, &saved_point]() {
-        saved_point = rl_point;
-        saved_line = rl_copy_text(0, rl_end);
-        rl_save_prompt();
-        rl_replace_line("", 0);
-        rl_redisplay();
-
-        saved = true;
-    };
-    auto restore = [&saved_line, &saved_point]() {
-        rl_restore_prompt();
-        rl_replace_line(saved_line, 0);
-        rl_point = saved_point;
-        rl_redisplay();
-        free(saved_line);
-    };
 
     // read until the end of time
     char buf[16384];
@@ -152,8 +164,10 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
             // done?
             break;
         } else {
-            if (!saved && !state.paused)
-                save();
+            if (!saved && !state.paused) {
+                state.saveState();
+                saved = true;
+            }
             write(buf, r);
 
 #ifdef LOG
@@ -163,7 +177,7 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
         }
     }
     if (saved)
-        restore();
+        state.restoreState();
 }
 
 void State::run(void* arg)
@@ -260,6 +274,7 @@ void State::run(void* arg)
                         if (state.paused) {
                             state.paused = false;
                             rl_callback_handler_install(state.prompt.c_str(), handler);
+                            state.restoreState();
                         }
                         uv_async_send(&state.resumeAsync);
                         break;
@@ -306,6 +321,7 @@ void State::run(void* arg)
         if (pendingPause) {
             if (!state.paused) {
                 state.paused = true;
+                state.saveState();
                 rl_callback_handler_remove();
             }
             uv_async_send(&state.pauseAsync);
