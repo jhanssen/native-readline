@@ -5,6 +5,7 @@
 #include <fcntl.h>
 
 Redirector::Redirector()
+    : mPaused(false)
 {
     // should make this a bit more resilient against errors
 
@@ -62,4 +63,24 @@ void Redirector::writeStderr(const char* data, int len)
         len = strlen(data);
     int w;
     EINTRWRAP(w, write(mStdout.real, data, len));
+}
+
+void Redirector::pause()
+{
+    if (mPaused)
+        return;
+    mPaused = true;
+    // restore fds
+    dup2(mStdout.real, STDOUT_FILENO);
+    dup2(mStderr.real, STDERR_FILENO);
+}
+
+void Redirector::resume()
+{
+    if (!mPaused)
+        return;
+    mPaused = false;
+    // restore fds
+    dup2(mStdout.pipe[1], STDOUT_FILENO);
+    dup2(mStderr.pipe[1], STDERR_FILENO);
 }

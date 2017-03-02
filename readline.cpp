@@ -273,6 +273,7 @@ void State::run(void* arg)
                     case WakeupResume:
                         if (state.paused) {
                             state.paused = false;
+                            state.redirector.resume();
                             rl_callback_handler_install(state.prompt.c_str(), handler);
                             state.restoreState();
                         }
@@ -323,6 +324,7 @@ void State::run(void* arg)
                 state.paused = true;
                 state.saveState();
                 rl_callback_handler_remove();
+                state.redirector.pause();
             }
             uv_async_send(&state.pauseAsync);
             pendingPause = false;

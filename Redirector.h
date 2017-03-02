@@ -18,6 +18,9 @@ public:
     void writeStdout(const char* data, int len = -1);
     void writeStderr(const char* data, int len = -1);
 
+    void pause();
+    void resume();
+
 private:
     struct Dup
     {
@@ -27,6 +30,7 @@ private:
     };
 
     Dup mStdout, mStderr;
+    bool mPaused;
 };
 
 #endif
