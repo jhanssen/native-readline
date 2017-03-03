@@ -489,6 +489,35 @@ NAN_METHOD(error) {
     }
 }
 
+NAN_METHOD(addHistory) {
+    if (info.Length() >= 1 && info[0]->IsString()) {
+        Nan::Utf8String str(info[0]);
+        add_history(*str);
+    } else {
+        Nan::ThrowError("addHistory takes a string");
+    }
+}
+
+NAN_METHOD(readHistory) {
+    if (info.Length() >= 1 && info[0]->IsString()) {
+        Nan::Utf8String str(info[0]);
+        const int ret = read_history(*str);
+        info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
+    } else {
+        Nan::ThrowError("addHistory takes a string");
+    }
+}
+
+NAN_METHOD(writeHistory) {
+    if (info.Length() >= 1 && info[0]->IsString()) {
+        Nan::Utf8String str(info[0]);
+        const int ret = write_history(*str);
+        info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
+    } else {
+        Nan::ThrowError("addHistory takes a string");
+    }
+}
+
 NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, start);
     NAN_EXPORT(target, stop);
@@ -497,6 +526,9 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
+    NAN_EXPORT(target, addHistory);
+    NAN_EXPORT(target, readHistory);
+    NAN_EXPORT(target, writeHistory);
 }
 
 NODE_MODULE(nativeReadline, Initialize)
