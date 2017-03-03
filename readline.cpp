@@ -489,6 +489,18 @@ NAN_METHOD(error) {
     }
 }
 
+NAN_METHOD(setOptions) {
+    if (info.Length() >= 1 && info[0]->IsObject()) {
+        auto obj = v8::Handle<v8::Object>::Cast(info[0]);
+        auto histMax = Nan::Get(obj, Nan::New("historyMax").ToLocalChecked()).ToLocalChecked();
+        if (!histMax.IsEmpty() && histMax->IsNumber()) {
+            history_max_entries = static_cast<int>(v8::Handle<v8::Number>::Cast(histMax)->Value());
+        }
+    } else {
+        Nan::ThrowError("setOptions takes an object");
+    }
+}
+
 NAN_METHOD(addHistory) {
     if (info.Length() >= 1 && info[0]->IsString()) {
         Nan::Utf8String str(info[0]);
@@ -502,9 +514,12 @@ NAN_METHOD(readHistory) {
     if (info.Length() >= 1 && info[0]->IsString()) {
         Nan::Utf8String str(info[0]);
         const int ret = read_history(*str);
+        if (!ret) {
+            using_history();
+        }
         info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
     } else {
-        Nan::ThrowError("addHistory takes a string");
+        Nan::ThrowError("readHistory takes a string");
     }
 }
 
@@ -514,7 +529,7 @@ NAN_METHOD(writeHistory) {
         const int ret = write_history(*str);
         info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
     } else {
-        Nan::ThrowError("addHistory takes a string");
+        Nan::ThrowError("writeHistory takes a string");
     }
 }
 
@@ -526,6 +541,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
+    NAN_EXPORT(target, setOptions);
     NAN_EXPORT(target, addHistory);
     NAN_EXPORT(target, readHistory);
     NAN_EXPORT(target, writeHistory);
