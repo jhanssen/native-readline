@@ -77,6 +77,36 @@ struct State
 
 static State state;
 
+void logException(const Nan::TryCatch& tryCatch)
+{
+    Nan::HandleScope scope;
+    Nan::Utf8String str(tryCatch.Exception());
+    fprintf(stderr, "EXCEPTION: '%s'\n", *str);
+    auto maybeStack = tryCatch.StackTrace();
+    if (!maybeStack.IsEmpty()) {
+        auto stack = maybeStack.ToLocalChecked();
+        Nan::Utf8String stackStr(stack);
+        fprintf(stderr, "%s\n", *stackStr);
+    } else {
+        auto msg = tryCatch.Message();
+        if (!msg.IsEmpty()) {
+            auto stack = msg->GetStackTrace();
+            //fprintf(stderr, "frames:%d\n", stack->GetFrameCount());
+            for (auto i = 0; i < stack->GetFrameCount(); ++i) {
+                auto frame = stack->GetFrame(i);
+                if (!frame.IsEmpty()) {
+                    auto frameName = frame->GetScriptName();
+                    auto funcName = frame->GetFunctionName();
+                    Nan::Utf8String name(frameName);
+                    Nan::Utf8String func(funcName);
+                    fprintf(stderr, "%s (%s:%d:%d)\n", *func, *name, frame->GetLineNumber(), frame->GetColumn());
+                }
+            }
+        }
+    }
+    fprintf(stderr, "---\n");
+}
+
 bool State::init()
 {
     state.iso = v8::Isolate::GetCurrent();
@@ -345,6 +375,8 @@ void State::run(void* arg)
 }
 
 NAN_METHOD(start) {
+    info.GetIsolate()->SetCaptureStackTraceForUncaughtExceptions(true, 30);
+
     // two arguments, output callback and complete callback
     if (state.started) {
         Nan::ThrowError("Already started. Stop first");
@@ -400,7 +432,11 @@ NAN_METHOD(start) {
                 if (!ok)
                     break;
                 auto value = makeValue(line);
+                Nan::TryCatch tryCatch;
                 f->Call(f, 1, &value);
+                if (tryCatch.HasCaught()) {
+                    logException(tryCatch);
+                }
             }
         } else if (async == &state.completion.async) {
             auto iso = v8::Isolate::GetCurrent();
@@ -422,7 +458,16 @@ NAN_METHOD(start) {
             values.push_back(cb);
 
             // ask js, pass a callback
+            Nan::TryCatch tryCatch;
             f->Call(f, values.size(), &values[0]);
+            if (tryCatch.HasCaught()) {
+                logException(tryCatch);
+
+                MutexLocker locker(&state.completion.mutex);
+                state.completion.results.clear();
+                //state.redirector.writeStdout("signaling\n");
+                state.completion.condition.signal();
+            }
         } else if (async == &state.pauseAsync) {
             state.pauseCb.Call(0, 0);
             state.pauseCb.Reset();
