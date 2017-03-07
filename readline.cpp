@@ -222,6 +222,7 @@ void State::run(void* arg)
     rl_outstream = state.redirector.stdoutFile();
     rl_callback_handler_install(state.prompt.c_str(), handler);
     rl_attempted_completion_function = completer;
+    rl_completion_append_character = '\0';
 
     const int stdoutfd = state.redirector.stdout();
     const int stderrfd = state.redirector.stderr();
