@@ -198,6 +198,10 @@ void State::run(void* arg)
         // ### if we want file completion, just return nullptr before setting this variable
         rl_attempted_completion_over = 1;
 
+        // we want full control over the output
+        rl_completion_suppress_append = 1;
+        rl_completion_suppress_quote = 1;
+
         //state.redirector.writeStdout("precomplete\n");
         MutexLocker locker(&state.completion.mutex);
         state.completion.pending = { rl_line_buffer, text, start, end };
@@ -222,7 +226,6 @@ void State::run(void* arg)
     rl_outstream = state.redirector.stdoutFile();
     rl_callback_handler_install(state.prompt.c_str(), handler);
     rl_attempted_completion_function = completer;
-    rl_completion_append_character = '\0';
 
     const int stdoutfd = state.redirector.stdout();
     const int stderrfd = state.redirector.stderr();
