@@ -21,13 +21,24 @@ struct State
     uv_thread_t thread;
     int wakeupPipe[2];
     Redirector redirector;
-    std::string prompt;
 #ifdef LOG
     FILE* log;
 #endif
 
     Mutex mutex;
     bool stopped;
+
+    struct {
+        Nan::Callback function;
+        uv_async_t async;
+
+        std::string text;
+
+        Mutex mutex;
+        Condition condition;
+
+        bool has, updated;
+    } prompt;
 
     struct {
         Nan::Persistent<v8::Function> function;
@@ -77,11 +88,11 @@ struct State
 
 static State state;
 
-void logException(const Nan::TryCatch& tryCatch)
+void logException(const char* msg, const Nan::TryCatch& tryCatch)
 {
     Nan::HandleScope scope;
     Nan::Utf8String str(tryCatch.Exception());
-    fprintf(stderr, "EXCEPTION: '%s'\n", *str);
+    fprintf(stderr, "EXCEPTION: %s '%s'\n", msg, *str);
     auto maybeStack = tryCatch.StackTrace();
     if (!maybeStack.IsEmpty()) {
         auto stack = maybeStack.ToLocalChecked();
@@ -252,9 +263,19 @@ void State::run(void* arg)
         }
         return nullptr;
     };
+    auto reprompt = []() -> const std::string& {
+        MutexLocker locker(&state.prompt.mutex);
+        if (!state.prompt.has || state.prompt.updated) {
+            state.prompt.updated = false;
+            return state.prompt.text;
+        }
+        uv_async_send(&state.prompt.async);
+        state.prompt.condition.wait(&state.prompt.mutex);
+        return state.prompt.text;
+    };
 
     rl_outstream = state.redirector.stdoutFile();
-    rl_callback_handler_install(state.prompt.c_str(), handler);
+    rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
 
     const int stdoutfd = state.redirector.stdout();
@@ -308,14 +329,18 @@ void State::run(void* arg)
                         if (state.paused) {
                             state.paused = false;
                             state.redirector.resume();
-                            rl_callback_handler_install(state.prompt.c_str(), handler);
+                            const std::string& text = reprompt();
+                            rl_callback_handler_install(text.c_str(), handler);
                             state.restoreState();
                         }
                         uv_async_send(&state.resumeAsync);
                         break;
                     case WakeupPrompt:
-                        if (!state.paused)
+                        if (!state.paused) {
+                            const std::string& text = reprompt();
+                            rl_set_prompt(text.c_str());
                             rl_redisplay();
+                        }
                         uv_async_send(&state.promptAsync);
                         break;
                     }
@@ -394,9 +419,24 @@ NAN_METHOD(start) {
         Nan::ThrowError("Unable to init readline");
         return;
     }
-    state.prompt = "foobar> ";
     state.readline.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[0])));
     state.completion.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[1])));
+
+    state.prompt.has = false;
+    state.prompt.updated = false;
+    if (info.Length() > 2 && info[2]->IsFunction()) {
+        state.prompt.has = true;
+        state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[2]));
+        auto ret = state.prompt.function.Call(0, 0);
+        if (!ret.IsEmpty() && ret->IsString()) {
+            Nan::Utf8String str(ret);
+            state.prompt.text = *str;
+        } else {
+            state.prompt.text = "jsh> ";
+        }
+    } else {
+        state.prompt.text = "jsh> ";
+    }
 
     {
         auto callback = [](const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -435,9 +475,12 @@ NAN_METHOD(start) {
                 Nan::TryCatch tryCatch;
                 f->Call(f, 1, &value);
                 if (tryCatch.HasCaught()) {
-                    logException(tryCatch);
+                    logException("Readline", tryCatch);
                 }
             }
+
+            // possibly reprompt
+            state.wakeup(State::WakeupPrompt);
         } else if (async == &state.completion.async) {
             auto iso = v8::Isolate::GetCurrent();
             v8::Handle<v8::Function> f = v8::Local<v8::Function>::New(iso, state.completion.function);
@@ -461,28 +504,54 @@ NAN_METHOD(start) {
             Nan::TryCatch tryCatch;
             f->Call(f, values.size(), &values[0]);
             if (tryCatch.HasCaught()) {
-                logException(tryCatch);
+                logException("Completion", tryCatch);
 
                 MutexLocker locker(&state.completion.mutex);
                 state.completion.results.clear();
                 //state.redirector.writeStdout("signaling\n");
                 state.completion.condition.signal();
             }
+        } else if (async == &state.prompt.async) {
+            bool hasPrompt = false;
+            std::string text;
+            Nan::TryCatch tryCatch;
+            auto p = state.prompt.function.Call(0, 0);
+            if (tryCatch.HasCaught()) {
+                logException("Prompt", tryCatch);
+            } else {
+                if (!p.IsEmpty() && p->IsString()) {
+                    Nan::Utf8String str(p);
+                    hasPrompt = true;
+                    text = *str;
+                }
+            }
+            MutexLocker locker(&state.prompt.mutex);
+            if (hasPrompt) {
+                state.prompt.text = text;
+            }
+            state.prompt.condition.signal();
         } else if (async == &state.pauseAsync) {
-            state.pauseCb.Call(0, 0);
-            state.pauseCb.Reset();
+            if (!state.pauseCb.IsEmpty()) {
+                state.pauseCb.Call(0, 0);
+                state.pauseCb.Reset();
+            }
         } else if (async == &state.resumeAsync) {
-            state.resumeCb.Call(0, 0);
-            state.resumeCb.Reset();
+            if (!state.resumeCb.IsEmpty()) {
+                state.resumeCb.Call(0, 0);
+                state.resumeCb.Reset();
+            }
         } else if (async == &state.promptAsync) {
-            state.promptCb.Call(0, 0);
-            state.promptCb.Reset();
+            if (!state.promptCb.IsEmpty()) {
+                state.promptCb.Call(0, 0);
+                state.promptCb.Reset();
+            }
         } else {
         }
     };
 
     uv_async_init(uv_default_loop(), &state.readline.async, cb);
     uv_async_init(uv_default_loop(), &state.completion.async, cb);
+    uv_async_init(uv_default_loop(), &state.prompt.async, cb);
 
     uv_async_init(uv_default_loop(), &state.pauseAsync, cb);
     uv_async_init(uv_default_loop(), &state.resumeAsync, cb);
@@ -502,6 +571,12 @@ NAN_METHOD(pause) {
 
 NAN_METHOD(resume) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        if (info.Length() >= 2 && info[1]->IsString()) {
+            MutexLocker locker(&state.prompt.mutex);
+            state.prompt.text = *Nan::Utf8String(info[1]);
+            state.prompt.updated = true;
+        }
+
         state.resumeCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupResume);
     } else {
@@ -511,10 +586,33 @@ NAN_METHOD(resume) {
 
 NAN_METHOD(prompt) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        if (info.Length() >= 2 && info[1]->IsString()) {
+            MutexLocker locker(&state.prompt.mutex);
+            state.prompt.text = *Nan::Utf8String(info[1]);
+            state.prompt.updated = true;
+        }
+
         state.promptCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPrompt);
     } else {
         Nan::ThrowError("prompt takes a function callback");
+    }
+}
+
+NAN_METHOD(setPrompt) {
+    if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        auto ret = state.prompt.function.Call(0, 0);
+
+        MutexLocker locker(&state.prompt.mutex);
+        state.prompt.has = true;
+        if (!ret.IsEmpty() && ret->IsString()) {
+            Nan::Utf8String str(ret);
+            state.prompt.text = *str;
+            state.prompt.updated = true;
+        }
+
+        state.wakeup(State::WakeupPrompt);
     }
 }
 
@@ -587,6 +685,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, stop);
     NAN_EXPORT(target, pause);
     NAN_EXPORT(target, resume);
+    NAN_EXPORT(target, setPrompt);
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
