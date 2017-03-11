@@ -30,6 +30,7 @@ struct State
 
     struct {
         Nan::Callback function;
+        Nan::Persistent<v8::Function> callback;
         uv_async_t async;
 
         std::string text;
@@ -338,6 +339,9 @@ void State::run(void* arg)
                     case WakeupPrompt:
                         if (!state.paused) {
                             const std::string& text = reprompt();
+                            // I really have no idea why I have to clear the prompt and redisplay, but I do.
+                            rl_set_prompt("");
+                            rl_redisplay();
                             rl_set_prompt(text.c_str());
                             rl_redisplay();
                         }
@@ -422,12 +426,27 @@ NAN_METHOD(start) {
     state.readline.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[0])));
     state.completion.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[1])));
 
+    {
+        auto callback = [](const v8::FunctionCallbackInfo<v8::Value>& info) {
+            if (info.Length() >= 1 && info[0]->IsString()) {
+                MutexLocker locker(&state.prompt.mutex);
+                state.prompt.text = *Nan::Utf8String(info[0]);
+                state.prompt.updated = true;
+                state.wakeup(State::WakeupPrompt);
+            }
+        };
+        auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
+        state.prompt.callback.Reset(Nan::Persistent<v8::Function>(cb.ToLocalChecked()));
+    }
     state.prompt.has = false;
     state.prompt.updated = false;
     if (info.Length() > 2 && info[2]->IsFunction()) {
         state.prompt.has = true;
         state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[2]));
-        auto ret = state.prompt.function.Call(0, 0);
+
+        auto iso = info.GetIsolate();
+        v8::Local<v8::Value> cb = v8::Local<v8::Function>::New(iso, state.prompt.callback);
+        auto ret = state.prompt.function.Call(1, &cb);
         if (!ret.IsEmpty() && ret->IsString()) {
             Nan::Utf8String str(ret);
             state.prompt.text = *str;
@@ -515,7 +534,8 @@ NAN_METHOD(start) {
             bool hasPrompt = false;
             std::string text;
             Nan::TryCatch tryCatch;
-            auto p = state.prompt.function.Call(0, 0);
+            v8::Local<v8::Value> cb = v8::Local<v8::Function>::New(state.iso, state.prompt.callback);
+            auto p = state.prompt.function.Call(1, &cb);
             if (tryCatch.HasCaught()) {
                 logException("Prompt", tryCatch);
             } else {
@@ -602,7 +622,9 @@ NAN_METHOD(prompt) {
 NAN_METHOD(setPrompt) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
         state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
-        auto ret = state.prompt.function.Call(0, 0);
+        auto iso = info.GetIsolate();
+        v8::Local<v8::Value> cb = v8::Local<v8::Function>::New(iso, state.prompt.callback);
+        auto ret = state.prompt.function.Call(1, &cb);
 
         MutexLocker locker(&state.prompt.mutex);
         state.prompt.has = true;
