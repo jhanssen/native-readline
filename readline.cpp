@@ -3,6 +3,7 @@
 #include <sys/ioctl.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <memory>
 #include "utils.h"
 #include "Redirector.h"
 #include <errno.h>
@@ -77,7 +78,7 @@ struct State
     };
     void wakeup(WakeupReason reason);
     uv_async_t pauseAsync, resumeAsync, promptAsync;
-    Nan::Callback pauseCb, resumeCb, promptCb;
+    std::unique_ptr<Nan::Callback> pauseCb, resumeCb, promptCb;
 
     // pause state
     char* savedLine;
@@ -551,19 +552,19 @@ NAN_METHOD(start) {
             }
             state.prompt.condition.signal();
         } else if (async == &state.pauseAsync) {
-            if (!state.pauseCb.IsEmpty()) {
-                state.pauseCb.Call(0, 0);
-                state.pauseCb.Reset();
+            if (state.pauseCb) {
+                auto cb = std::move(state.pauseCb);
+                cb->Call(0, 0);
             }
         } else if (async == &state.resumeAsync) {
-            if (!state.resumeCb.IsEmpty()) {
-                state.resumeCb.Call(0, 0);
-                state.resumeCb.Reset();
+            if (state.resumeCb) {
+                auto cb = std::move(state.resumeCb);
+                cb->Call(0, 0);
             }
         } else if (async == &state.promptAsync) {
-            if (!state.promptCb.IsEmpty()) {
-                state.promptCb.Call(0, 0);
-                state.promptCb.Reset();
+            if (state.promptCb) {
+                auto cb = std::move(state.promptCb);
+                cb->Call(0, 0);
             }
         } else {
         }
@@ -582,7 +583,7 @@ NAN_METHOD(start) {
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
-        state.pauseCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.pauseCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPause);
     } else {
         Nan::ThrowError("pause takes a function callback");
@@ -597,7 +598,7 @@ NAN_METHOD(resume) {
             state.prompt.updated = true;
         }
 
-        state.resumeCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.resumeCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupResume);
     } else {
         Nan::ThrowError("resume takes a function callback");
@@ -612,7 +613,7 @@ NAN_METHOD(prompt) {
             state.prompt.updated = true;
         }
 
-        state.promptCb.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.promptCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPrompt);
     } else {
         Nan::ThrowError("prompt takes a function callback");

@@ -22,7 +22,13 @@
         "-lreadline"
       ],
       "target_name": "native-readline",
-      "sources": [ "readline.cpp", "Redirector.cpp", "utils.cpp" ]
+      "sources": [ "readline.cpp", "Redirector.cpp", "utils.cpp" ],
+      "cflags_cc": [ "-std=c++14" ],
+      "xcode_settings": {
+	"OTHER_CPLUSPLUSFLAGS": [
+	  "-std=c++14"
+	]
+      }
     }
   ]
 }
