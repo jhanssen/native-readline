@@ -1,6 +1,7 @@
 #include <nan.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <memory>
@@ -65,6 +66,13 @@ struct State
         Condition condition;
     } completion;
 
+    struct {
+        Nan::Callback function;
+        uv_async_t async;
+        int rows, cols;
+        Mutex mutex;
+    } term;
+
     static void run(void* arg);
 
     bool init();
@@ -74,11 +82,14 @@ struct State
         WakeupStop,
         WakeupPause,
         WakeupResume,
-        WakeupPrompt
+        WakeupPrompt,
+        WakeupWinch
     };
     void wakeup(WakeupReason reason);
     uv_async_t pauseAsync, resumeAsync, promptAsync;
     std::unique_ptr<Nan::Callback> pauseCb, resumeCb, promptCb;
+
+    uv_signal_t handleSignal;
 
     // pause state
     char* savedLine;
@@ -86,6 +97,8 @@ struct State
 
     void saveState();
     void restoreState();
+
+    void readTermInfo();
 };
 
 static State state;
@@ -188,6 +201,18 @@ void State::restoreState()
     state.savedLine = 0;
 }
 
+void State::readTermInfo()
+{
+    struct winsize win;
+    const int tty = STDIN_FILENO;
+    if (ioctl(tty, TIOCGWINSZ, &win) == 0) {
+        MutexLocker locker(&state.term.mutex);
+        state.term.rows = win.ws_row;
+        state.term.cols = win.ws_col;
+        uv_async_send(&state.term.async);
+    }
+}
+
 static void handleOut(int fd, const std::function<void(const char*, int)>& write)
 {
     bool saved = false;
@@ -276,6 +301,10 @@ void State::run(void* arg)
         return state.prompt.text;
     };
 
+    state.readTermInfo();
+
+    rl_catch_signals = 0;
+    rl_catch_sigwinch = 0;
     rl_outstream = state.redirector.stdoutFile();
     rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
@@ -332,6 +361,8 @@ void State::run(void* arg)
                             state.paused = false;
                             state.redirector.resume();
                             const std::string& text = reprompt();
+                            rl_resize_terminal();
+                            state.readTermInfo();
                             rl_callback_handler_install(text.c_str(), handler);
                             state.restoreState();
                         }
@@ -347,6 +378,10 @@ void State::run(void* arg)
                             rl_redisplay();
                         }
                         uv_async_send(&state.promptAsync);
+                        break;
+                    case WakeupWinch:
+                        rl_resize_terminal();
+                        state.readTermInfo();
                         break;
                     }
                 }
@@ -566,6 +601,27 @@ NAN_METHOD(start) {
                 auto cb = std::move(state.promptCb);
                 cb->Call(0, 0);
             }
+        } else if (async == &state.term.async) {
+            if (state.term.function.IsEmpty())
+                return;
+
+            auto iso = v8::Isolate::GetCurrent();
+            v8::Local<v8::Object> data = v8::Object::New(iso);
+
+            {
+                MutexLocker locker(&state.term.mutex);
+                data->Set(makeValue("rows"), v8::Integer::New(state.iso, state.term.rows));
+                data->Set(makeValue("cols"), v8::Integer::New(state.iso, state.term.cols));
+            }
+
+            v8::Local<v8::Value> val = data;
+
+            // tell js
+            Nan::TryCatch tryCatch;
+            state.term.function.Call(1, &val);
+            if (tryCatch.HasCaught()) {
+                logException("Term", tryCatch);
+            }
         } else {
         }
     };
@@ -578,11 +634,20 @@ NAN_METHOD(start) {
     uv_async_init(uv_default_loop(), &state.resumeAsync, cb);
     uv_async_init(uv_default_loop(), &state.promptAsync, cb);
 
+    uv_async_init(uv_default_loop(), &state.term.async, cb);
+
+    uv_signal_init(uv_default_loop(), &state.handleSignal);
+    uv_signal_start(&state.handleSignal, [](uv_signal_t*, int) {
+            state.wakeup(State::WakeupWinch);
+        }, SIGWINCH);
+
     uv_thread_create(&state.thread, State::run, 0);
 }
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        uv_signal_stop(&state.handleSignal);
+
         state.pauseCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPause);
     } else {
@@ -598,6 +663,9 @@ NAN_METHOD(resume) {
             state.prompt.updated = true;
         }
 
+        uv_signal_start(&state.handleSignal, [](uv_signal_t*, int) {
+                state.wakeup(State::WakeupWinch);
+            }, SIGWINCH);
         state.resumeCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupResume);
     } else {
@@ -636,6 +704,13 @@ NAN_METHOD(setPrompt) {
         }
 
         state.wakeup(State::WakeupPrompt);
+    }
+}
+
+NAN_METHOD(setTerm) {
+    if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.term.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
+        state.wakeup(State::WakeupWinch);
     }
 }
 
@@ -709,6 +784,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, pause);
     NAN_EXPORT(target, resume);
     NAN_EXPORT(target, setPrompt);
+    NAN_EXPORT(target, setTerm);
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
