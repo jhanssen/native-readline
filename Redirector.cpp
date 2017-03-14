@@ -62,7 +62,7 @@ void Redirector::writeStderr(const char* data, int len)
     if (len == -1)
         len = strlen(data);
     int w;
-    EINTRWRAP(w, write(mStdout.real, data, len));
+    EINTRWRAP(w, write(mStderr.real, data, len));
 }
 
 void Redirector::pause()
