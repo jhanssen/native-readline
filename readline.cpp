@@ -305,7 +305,8 @@ void State::run(void* arg)
 
     rl_catch_signals = 0;
     rl_catch_sigwinch = 0;
-    rl_outstream = state.redirector.stdoutFile();
+    rl_outstream = state.redirector.stderrFile();
+    rl_change_environment = 0;
     rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
 
