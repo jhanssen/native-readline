@@ -83,13 +83,14 @@ struct State
         WakeupPause,
         WakeupResume,
         WakeupPrompt,
+        WakeupInt,
         WakeupWinch
     };
     void wakeup(WakeupReason reason);
     uv_async_t pauseAsync, resumeAsync, promptAsync;
     std::unique_ptr<Nan::Callback> pauseCb, resumeCb, promptCb;
 
-    uv_signal_t handleSignal;
+    uv_signal_t handleWinchSignal;
 
     // pause state
     char* savedLine;
@@ -303,10 +304,13 @@ void State::run(void* arg)
 
     state.readTermInfo();
 
+    rl_persistent_signal_handlers = 0;
     rl_catch_signals = 0;
     rl_catch_sigwinch = 0;
-    rl_outstream = state.redirector.stderrFile();
     rl_change_environment = 0;
+    rl_outstream = state.redirector.stderrFile();
+    rl_initialize();
+
     rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
 
@@ -369,6 +373,24 @@ void State::run(void* arg)
                         }
                         uv_async_send(&state.resumeAsync);
                         break;
+                    case WakeupInt: {
+                        rl_callback_sigcleanup();
+
+                        if (rl_undo_list)
+                            rl_free_undo_list ();
+                        rl_point = 0;
+                        rl_kill_text (rl_point, rl_end);
+                        rl_mark = 0;
+                        rl_clear_message();
+                        rl_crlf();
+                        rl_reset_line_state();
+
+                        const std::string& text = reprompt();
+                        rl_set_prompt("");
+                        rl_redisplay();
+                        rl_set_prompt(text.c_str());
+                        rl_redisplay();
+                        break; }
                     case WakeupPrompt:
                         if (!state.paused) {
                             const std::string& text = reprompt();
@@ -637,8 +659,8 @@ NAN_METHOD(start) {
 
     uv_async_init(uv_default_loop(), &state.term.async, cb);
 
-    uv_signal_init(uv_default_loop(), &state.handleSignal);
-    uv_signal_start(&state.handleSignal, [](uv_signal_t*, int) {
+    uv_signal_init(uv_default_loop(), &state.handleWinchSignal);
+    uv_signal_start(&state.handleWinchSignal, [](uv_signal_t*, int) {
             state.wakeup(State::WakeupWinch);
         }, SIGWINCH);
 
@@ -647,7 +669,7 @@ NAN_METHOD(start) {
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
-        uv_signal_stop(&state.handleSignal);
+        uv_signal_stop(&state.handleWinchSignal);
 
         state.pauseCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPause);
@@ -664,9 +686,10 @@ NAN_METHOD(resume) {
             state.prompt.updated = true;
         }
 
-        uv_signal_start(&state.handleSignal, [](uv_signal_t*, int) {
+        uv_signal_start(&state.handleWinchSignal, [](uv_signal_t*, int) {
                 state.wakeup(State::WakeupWinch);
             }, SIGWINCH);
+
         state.resumeCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupResume);
     } else {
@@ -735,6 +758,10 @@ NAN_METHOD(error) {
     }
 }
 
+NAN_METHOD(sigint) {
+    state.wakeup(State::WakeupInt);
+}
+
 NAN_METHOD(setOptions) {
     if (info.Length() >= 1 && info[0]->IsObject()) {
         auto obj = v8::Handle<v8::Object>::Cast(info[0]);
@@ -789,6 +816,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
+    NAN_EXPORT(target, sigint);
     NAN_EXPORT(target, setOptions);
     NAN_EXPORT(target, addHistory);
     NAN_EXPORT(target, readHistory);
