@@ -6,8 +6,8 @@
         "os_include": "/usr/local/opt/readline/include",
         "os_libs": "-L/usr/local/opt/readline/lib"
       }, {
-        "os_include": "",
-        "os_libs": ""
+        "os_include": "<!(echo $READLINE_INCLUDES)",
+        "os_libs": "<!(echo $READLINE_LIBS)"
       }],
     ],
   },
