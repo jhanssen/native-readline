@@ -5,7 +5,7 @@
     "conditions": [
       # Define variables that points at OS-specific paths.
       ["OS=='mac'", {
-        "os_libs": ""
+        "os_libs": "-lncurses"
       }, {
         "os_libs": "-ltinfo"
       }],
