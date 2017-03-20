@@ -4,6 +4,7 @@
   "description": "Native libreadline support",
   "main": "index.js",
   "scripts": {
+    "preinstall": "./preinstall.sh",
     "build": "node-gyp rebuild",
     "build-debug": "node-gyp rebuild --debug"
   },
