@@ -10,7 +10,8 @@
         "<!(node -e \"require('nan')\")"
       ],
       "libraries": [
-        "<(os_libs)"
+        "<(os_libs)",
+        "-ltinfo"
       ],
       "target_name": "native-readline",
       "sources": [ "readline.cpp", "Redirector.cpp", "utils.cpp" ],
