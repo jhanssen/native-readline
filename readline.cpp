@@ -35,7 +35,7 @@ struct State
         Nan::Persistent<v8::Function> callback;
         uv_async_t async;
 
-        std::string text;
+        std::string text, over;
 
         Mutex mutex;
         Condition condition;
@@ -293,6 +293,8 @@ void State::run(void* arg)
     };
     auto reprompt = []() -> const std::string& {
         MutexLocker locker(&state.prompt.mutex);
+        if (!state.prompt.over.empty())
+            return state.prompt.over;
         if (!state.prompt.has || state.prompt.updated) {
             state.prompt.updated = false;
             return state.prompt.text;
@@ -731,6 +733,20 @@ NAN_METHOD(setPrompt) {
     }
 }
 
+NAN_METHOD(overridePrompt) {
+    if (info.Length() >= 1 && info[0]->IsString()) {
+        MutexLocker locker(&state.prompt.mutex);
+        state.prompt.over = *Nan::Utf8String(info[0]);
+        state.wakeup(State::WakeupPrompt);
+    }
+}
+
+NAN_METHOD(restorePrompt) {
+    MutexLocker locker(&state.prompt.mutex);
+    state.prompt.over.clear();
+    state.wakeup(State::WakeupPrompt);
+}
+
 NAN_METHOD(setTerm) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
         state.term.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
@@ -759,6 +775,8 @@ NAN_METHOD(error) {
 }
 
 NAN_METHOD(sigint) {
+    MutexLocker locker(&state.prompt.mutex);
+    state.prompt.over.clear();
     state.wakeup(State::WakeupInt);
 }
 
@@ -812,6 +830,8 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, pause);
     NAN_EXPORT(target, resume);
     NAN_EXPORT(target, setPrompt);
+    NAN_EXPORT(target, overridePrompt);
+    NAN_EXPORT(target, restorePrompt);
     NAN_EXPORT(target, setTerm);
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
