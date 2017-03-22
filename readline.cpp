@@ -89,7 +89,8 @@ struct State
     };
     void wakeup(WakeupReason reason);
     uv_async_t pauseAsync, resumeAsync, promptAsync;
-    std::unique_ptr<Nan::Callback> pauseCb, resumeCb, promptCb;
+    std::unique_ptr<Nan::Callback> promptCb;
+    std::vector<std::unique_ptr<Nan::Callback> > pauseCb, resumeCb;
 
     uv_signal_t handleWinchSignal;
 
@@ -613,14 +614,18 @@ NAN_METHOD(start) {
             }
             state.prompt.condition.signal();
         } else if (async == &state.pauseAsync) {
-            if (state.pauseCb) {
-                auto cb = std::move(state.pauseCb);
-                cb->Call(0, 0);
+            if (!state.pauseCb.empty()) {
+                for (const auto& cb : state.pauseCb) {
+                    cb->Call(0, 0);
+                }
+                state.pauseCb.clear();
             }
         } else if (async == &state.resumeAsync) {
-            if (state.resumeCb) {
-                auto cb = std::move(state.resumeCb);
-                cb->Call(0, 0);
+            if (!state.resumeCb.empty()) {
+                for (const auto& cb : state.resumeCb) {
+                    cb->Call(0, 0);
+                }
+                state.resumeCb.clear();
             }
         } else if (async == &state.promptAsync) {
             if (state.promptCb) {
@@ -672,16 +677,22 @@ NAN_METHOD(start) {
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        if (state.pausecnt > 0) {
+            if (state.pauseCb.empty()) {
+                // fully paused, just call the function right away and bail out
+                auto func = v8::Local<v8::Function>::Cast(info[0]);
+                func->Call(func, 0, 0);
+                return;
+            }
+        }
+
+        state.pauseCb.push_back(std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0])));
         if (++state.pausecnt > 1) {
-            // just call the function right away and bail out
-            auto func = v8::Local<v8::Function>::Cast(info[0]);
-            func->Call(func, 0, 0);
+            // we have a pending pause, don't wake up for pause again
             return;
         }
 
         uv_signal_stop(&state.handleWinchSignal);
-
-        state.pauseCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupPause);
     } else {
         Nan::ThrowError("pause takes a function callback");
@@ -690,13 +701,11 @@ NAN_METHOD(pause) {
 
 NAN_METHOD(resume) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        state.resumeCb.push_back(std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0])));
+
         assert(state.pausecnt > 0);
-        if (--state.pausecnt > 0) {
-            // just call the function right away and bail out
-            auto func = v8::Local<v8::Function>::Cast(info[0]);
-            func->Call(func, 0, 0);
+        if (--state.pausecnt > 0)
             return;
-        }
 
         if (info.Length() >= 2 && info[1]->IsString()) {
             MutexLocker locker(&state.prompt.mutex);
@@ -707,8 +716,6 @@ NAN_METHOD(resume) {
         uv_signal_start(&state.handleWinchSignal, [](uv_signal_t*, int) {
                 state.wakeup(State::WakeupWinch);
             }, SIGWINCH);
-
-        state.resumeCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
         state.wakeup(State::WakeupResume);
     } else {
         Nan::ThrowError("resume takes a function callback");
