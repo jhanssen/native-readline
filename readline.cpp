@@ -615,17 +615,17 @@ NAN_METHOD(start) {
             state.prompt.condition.signal();
         } else if (async == &state.pauseAsync) {
             if (!state.pauseCb.empty()) {
-                for (const auto& cb : state.pauseCb) {
+                auto cbs = std::move(state.pauseCb);
+                for (const auto& cb : cbs) {
                     cb->Call(0, 0);
                 }
-                state.pauseCb.clear();
             }
         } else if (async == &state.resumeAsync) {
             if (!state.resumeCb.empty()) {
-                for (const auto& cb : state.resumeCb) {
+                auto cbs = std::move(state.resumeCb);
+                for (const auto& cb : cbs) {
                     cb->Call(0, 0);
                 }
-                state.resumeCb.clear();
             }
         } else if (async == &state.promptAsync) {
             if (state.promptCb) {
@@ -679,6 +679,7 @@ NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
         if (state.pausecnt > 0) {
             if (state.pauseCb.empty()) {
+                ++state.pausecnt;
                 // fully paused, just call the function right away and bail out
                 auto func = v8::Local<v8::Function>::Cast(info[0]);
                 func->Call(func, 0, 0);
