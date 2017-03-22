@@ -14,12 +14,13 @@
 
 struct State
 {
-    State() : started(false), paused(false), stopped(false), savedLine(0), savedPoint(0) { }
+    State() : started(false), paused(false), pausecnt(0), stopped(false), savedLine(0), savedPoint(0) { }
 
     v8::Isolate* iso;
 
     bool started;
     bool paused;
+    uint32_t pausecnt;
     uv_thread_t thread;
     int wakeupPipe[2];
     Redirector redirector;
@@ -671,6 +672,13 @@ NAN_METHOD(start) {
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        if (++state.pausecnt > 1) {
+            // just call the function right away and bail out
+            auto func = v8::Local<v8::Function>::Cast(info[0]);
+            func->Call(func, 0, 0);
+            return;
+        }
+
         uv_signal_stop(&state.handleWinchSignal);
 
         state.pauseCb = std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0]));
@@ -682,6 +690,14 @@ NAN_METHOD(pause) {
 
 NAN_METHOD(resume) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
+        assert(state.pausecnt > 0);
+        if (--state.pausecnt > 0) {
+            // just call the function right away and bail out
+            auto func = v8::Local<v8::Function>::Cast(info[0]);
+            func->Call(func, 0, 0);
+            return;
+        }
+
         if (info.Length() >= 2 && info[1]->IsString()) {
             MutexLocker locker(&state.prompt.mutex);
             state.prompt.text = *Nan::Utf8String(info[1]);
