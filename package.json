@@ -1,6 +1,6 @@
 {
   "name": "native-readline",
-  "version": "1.0.29",
+  "version": "1.0.30",
   "description": "Native libreadline support",
   "main": "index.js",
   "scripts": {
