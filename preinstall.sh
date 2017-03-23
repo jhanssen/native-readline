@@ -5,6 +5,7 @@ if [[ -d 3rdparty/readline ]]; then
     exit 0
 fi
 
+npm install nan
 mkdir -p 3rdparty
 cd 3rdparty
 git clone https://git.savannah.gnu.org/git/readline.git
