@@ -10,6 +10,10 @@
   },
   "author": "Jan Erik Hanssen",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhanssen/native-readline/"
+  },
   "gypfile": true,
   "dependencies": {
     "bindings": "^1.2.1",
