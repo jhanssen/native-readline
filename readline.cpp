@@ -374,6 +374,10 @@ void State::run(void* arg)
                             state.readTermInfo();
                             rl_callback_handler_install(text.c_str(), handler);
                             state.restoreState();
+                            rl_set_prompt("");
+                            rl_redisplay();
+                            rl_set_prompt(text.c_str());
+                            rl_redisplay();
                         }
                         uv_async_send(&state.resumeAsync);
                         break;
