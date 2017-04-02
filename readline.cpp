@@ -782,13 +782,34 @@ NAN_METHOD(start) {
                     text = *str;
                 }
             }
-            MutexLocker locker(&state.prompt.mutex);
             if (hasPrompt) {
-                state.prompt.text = text;
+                bool waiting;
+                {
+                    MutexLocker locker(&state.prompt.mutex);
+                    state.prompt.text = text;
+                    waiting = state.prompt.waiting;
+                }
+                if (!waiting) {
+                    MutexLocker locker(&state.resumeMutex);
+                    state.onResume.push_back([]() {
+                            std::string prompt;
+                            {
+                                MutexLocker locker(&state.prompt.mutex);
+                                prompt = state.prompt.text;
+                            }
+                            rl_set_prompt("");
+                            rl_redisplay();
+                            rl_set_prompt(prompt.c_str());
+                            rl_redisplay();
+                        });
+                    state.wakeup(State::WakeupRunResumes);
+                    return;
+                }
+                MutexLocker locker(&state.prompt.mutex);
                 state.prompt.waiting = false;
+                // state.redirector.writeStdout("resume due to prompt\n");
                 state.wakeup(State::WakeupResume);
             }
-            // state.redirector.writeStdout("resume due to prompt\n");
         } else if (async == &state.pauseAsync) {
             if (!state.pauseCb.empty()) {
                 auto cbs = std::move(state.pauseCb);
