@@ -130,6 +130,8 @@ struct State
     void restoreState();
 
     void readTermInfo();
+
+    void forcePrompt(const std::string& prompt);
 };
 
 static State state;
@@ -244,6 +246,24 @@ void State::readTermInfo()
     }
 }
 
+void State::forcePrompt(const std::string& prompt)
+{
+    // there really must be a better way of doing this. right? right?
+    int savedPoint = rl_point;
+    int savedMark = rl_mark;
+    char* savedLine = rl_copy_text(0, rl_end);
+    rl_replace_line("", 0);
+    rl_set_prompt("");
+    rl_redisplay();
+
+    rl_replace_line(savedLine, 0);
+    rl_set_prompt(prompt.c_str());
+    rl_point = savedPoint;
+    rl_mark = savedMark;
+    rl_redisplay();
+    free(savedLine);
+}
+
 static void handleOut(int fd, bool paused, const std::function<void(const char*, int)>& write)
 {
     bool saved = false;
@@ -343,10 +363,7 @@ void State::run(void* arg)
             }
         }
         if (has) {
-            rl_set_prompt("");
-            rl_redisplay();
-            rl_set_prompt(prompt.c_str());
-            rl_redisplay();
+            state.forcePrompt(prompt);
             return true;
         }
         {
@@ -658,10 +675,7 @@ NAN_METHOD(start) {
                             MutexLocker locker(&state.prompt.mutex);
                             prompt = state.prompt.text;
                         }
-                        rl_set_prompt("");
-                        rl_redisplay();
-                        rl_set_prompt(prompt.c_str());
-                        rl_redisplay();
+                        state.forcePrompt(prompt);
                     });
             }
             const bool waiting = state.prompt.isWaiting();
@@ -800,10 +814,7 @@ NAN_METHOD(start) {
                                 MutexLocker locker(&state.prompt.mutex);
                                 prompt = state.prompt.text;
                             }
-                            rl_set_prompt("");
-                            rl_redisplay();
-                            rl_set_prompt(prompt.c_str());
-                            rl_redisplay();
+                            state.forcePrompt(prompt);
                         });
                     state.wakeup(State::WakeupRunResumes);
                     return;
