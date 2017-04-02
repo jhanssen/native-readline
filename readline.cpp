@@ -663,9 +663,11 @@ NAN_METHOD(start) {
                         rl_set_prompt(prompt.c_str());
                         rl_redisplay();
                     });
-
             }
-            state.wakeup(state.prompt.isWaiting() ? State::WakeupResume : State::WakeupRunResumes);
+            const bool waiting = state.prompt.isWaiting();
+            // if (waiting)
+            //     state.redirector.writeStdout("resume due to late prompt\n");
+            state.wakeup(waiting ? State::WakeupResume : State::WakeupRunResumes);
         };
         auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
         state.prompt.callback.Reset(Nan::Persistent<v8::Function>(cb.ToLocalChecked()));
@@ -774,6 +776,7 @@ NAN_METHOD(start) {
             auto p = state.prompt.function.Call(1, &cb);
             if (tryCatch.HasCaught()) {
                 logException("Prompt", tryCatch);
+                // state.redirector.writeStdout("resume due to exception (prompt)\n");
                 state.wakeup(State::WakeupResume);
             } else {
                 if (!p.IsEmpty() && p->IsString()) {
