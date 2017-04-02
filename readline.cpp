@@ -566,11 +566,11 @@ void State::run(void* arg)
 
                                     if (rl_undo_list)
                                         rl_free_undo_list ();
-                                    rl_point = 0;
-                                    rl_kill_text (rl_point, rl_end);
-                                    rl_mark = 0;
                                     rl_clear_message();
                                     rl_crlf();
+                                    rl_point = rl_mark = 0;
+                                    rl_kill_text (rl_point, rl_end);
+                                    rl_mark = 0;
                                     rl_reset_line_state();
 
                                     if (!reprompt()) {
