@@ -73,8 +73,8 @@ struct State
         uv_async_t async;
 
         struct {
-            const char* buffer;
-            const char* text;
+            std::string buffer;
+            std::string text;
             int start, end;
         } pending;
         std::vector<std::string> results;
@@ -325,7 +325,7 @@ void State::run(void* arg)
         //state.redirector.writeStdout("precomplete\n");
         {
             MutexLocker locker(&state.completion.mutex);
-            state.completion.pending = { rl_line_buffer, text, start, end };
+            state.completion.pending = { std::string(rl_line_buffer), std::string(text), start, end };
             uv_async_send(&state.completion.async);
         }
         //state.redirector.writeStdout("postcomplete\n");
@@ -760,8 +760,8 @@ NAN_METHOD(start) {
 
             {
                 MutexLocker locker(&state.completion.mutex);
-                data->Set(makeValue("buffer"), makeValue(std::string(state.completion.pending.buffer)));
-                data->Set(makeValue("text"), makeValue(std::string(state.completion.pending.text)));
+                data->Set(makeValue("buffer"), makeValue(state.completion.pending.buffer));
+                data->Set(makeValue("text"), makeValue(state.completion.pending.text));
                 data->Set(makeValue("start"), v8::Integer::New(state.iso,state.completion.pending.start));
                 data->Set(makeValue("end"), v8::Integer::New(state.iso,state.completion.pending.end));
             }
