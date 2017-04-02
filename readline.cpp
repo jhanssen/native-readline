@@ -8,19 +8,28 @@
 #include "utils.h"
 #include "Redirector.h"
 #include <errno.h>
+#include <assert.h>
 #include <functional>
 
 // #define LOG
 
+#define rlassert(expr)                                                  \
+    do {                                                                \
+        if (!(expr)) {                                                  \
+            char buf[1024];                                             \
+            snprintf(buf, sizeof(buf), "assertion failed: %s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__); \
+            state.redirector.writeStdout(buf);                          \
+            abort();                                                    \
+        }                                                               \
+    } while (false)                                                     \
+
 struct State
 {
-    State() : started(false), paused(false), pausecnt(0), stopped(false), savedLine(0), savedPoint(0) { }
+    State() : started(false), stopped(false), lastIterateState(State::StateNormal), savedLine(0), savedPoint(0) { }
 
     v8::Isolate* iso;
 
     bool started;
-    bool paused;
-    uint32_t pausecnt;
     uv_thread_t thread;
     int wakeupPipe[2];
     Redirector redirector;
@@ -28,8 +37,9 @@ struct State
     FILE* log;
 #endif
 
-    Mutex mutex;
+    Mutex mutex, resumeMutex;
     bool stopped;
+    std::vector<std::function<void()> > onResume;
 
     struct {
         Nan::Callback function;
@@ -39,9 +49,15 @@ struct State
         std::string text, over;
 
         Mutex mutex;
-        Condition condition;
+        bool has, updated, waiting;
 
-        bool has, updated;
+        bool isWaiting()
+        {
+            MutexLocker locker(&mutex);
+            bool old = waiting;
+            waiting = false;
+            return old;
+        }
     } prompt;
 
     struct {
@@ -64,7 +80,7 @@ struct State
         std::vector<std::string> results;
 
         Mutex mutex;
-        Condition condition;
+        //Condition condition;
     } completion;
 
     struct {
@@ -83,6 +99,7 @@ struct State
         WakeupStop,
         WakeupPause,
         WakeupResume,
+        WakeupRunResumes,
         WakeupPrompt,
         WakeupInt,
         WakeupWinch
@@ -91,6 +108,17 @@ struct State
     uv_async_t pauseAsync, resumeAsync, promptAsync;
     std::unique_ptr<Nan::Callback> promptCb;
     std::vector<std::unique_ptr<Nan::Callback> > pauseCb, resumeCb;
+
+    enum IterateState {
+        StateNormal,
+        StatePause,
+        StatePrompt,
+        StateForcePrompt,
+        StateCompletion
+    };
+    IterateState lastIterateState;
+    std::vector<IterateState> iterateState;
+    std::function<void(IterateState)> iterate;
 
     uv_signal_t handleWinchSignal;
 
@@ -216,7 +244,7 @@ void State::readTermInfo()
     }
 }
 
-static void handleOut(int fd, const std::function<void(const char*, int)>& write)
+static void handleOut(int fd, bool paused, const std::function<void(const char*, int)>& write)
 {
     bool saved = false;
 
@@ -235,7 +263,7 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
             // done?
             break;
         } else {
-            if (!saved && !state.paused) {
+            if (!saved && !paused) {
                 state.saveState();
                 saved = true;
             }
@@ -247,8 +275,10 @@ static void handleOut(int fd, const std::function<void(const char*, int)>& write
 #endif
         }
     }
-    if (saved)
+
+    if (saved) {
         state.restoreState();
+    }
 }
 
 void State::run(void* arg)
@@ -258,7 +288,6 @@ void State::run(void* arg)
     auto handler = [](char* line) {
         if (!line) {
             // we're done
-            MutexLocker locker(&state.mutex);
             state.stopped = true;
             return;
         }
@@ -274,36 +303,58 @@ void State::run(void* arg)
         rl_completion_suppress_quote = 1;
 
         //state.redirector.writeStdout("precomplete\n");
-        MutexLocker locker(&state.completion.mutex);
-        state.completion.pending = { rl_line_buffer, text, start, end };
-        uv_async_send(&state.completion.async);
-        state.completion.condition.wait(&state.completion.mutex);
-        //state.redirector.writeStdout("postcomplete\n");
-
-        // loop through results and make a char**
-        if (!state.completion.results.empty()) {
-            char** array = static_cast<char**>(malloc((2 + state.completion.results.size()) * sizeof(*array)));
-            array[0] = strdup(longest_common_prefix(text, state.completion.results).c_str());
-            size_t ptr = 1;
-            for (const auto& m : state.completion.results) {
-                array[ptr++] = strdup(m.c_str());
-            }
-            array[ptr] = nullptr;
-            return array;
+        {
+            MutexLocker locker(&state.completion.mutex);
+            state.completion.pending = { rl_line_buffer, text, start, end };
+            uv_async_send(&state.completion.async);
         }
-        return nullptr;
+        //state.redirector.writeStdout("postcomplete\n");
+        state.iterate(State::StateCompletion);
+        if (state.stopped)
+            return nullptr;
+        {
+            MutexLocker locker(&state.completion.mutex);
+            // loop through results and make a char**
+            if (!state.completion.results.empty()) {
+                char** array = static_cast<char**>(malloc((2 + state.completion.results.size()) * sizeof(*array)));
+                array[0] = strdup(longest_common_prefix(text, state.completion.results).c_str());
+                size_t ptr = 1;
+                for (const auto& m : state.completion.results) {
+                    array[ptr++] = strdup(m.c_str());
+                }
+                array[ptr] = nullptr;
+                return array;
+            }
+            return nullptr;
+        }
     };
-    auto reprompt = []() -> const std::string& {
-        MutexLocker locker(&state.prompt.mutex);
-        if (!state.prompt.over.empty())
-            return state.prompt.over;
-        if (!state.prompt.has || state.prompt.updated) {
-            state.prompt.updated = false;
-            return state.prompt.text;
+    auto reprompt = [](bool force = false) -> bool {
+        bool has = false;
+        std::string prompt;
+        {
+            MutexLocker locker(&state.prompt.mutex);
+            if (!state.prompt.over.empty()) {
+                has = true;
+                prompt = state.prompt.over;
+            } else if (!state.prompt.has || state.prompt.updated || force) {
+                has = true;
+                state.prompt.updated = false;
+                prompt = state.prompt.text;
+            }
+        }
+        if (has) {
+            rl_set_prompt("");
+            rl_redisplay();
+            rl_set_prompt(prompt.c_str());
+            rl_redisplay();
+            return true;
+        }
+        {
+            MutexLocker locker(&state.prompt.mutex);
+            state.prompt.waiting = true;
         }
         uv_async_send(&state.prompt.async);
-        state.prompt.condition.wait(&state.prompt.mutex);
-        return state.prompt.text;
+        return false;
     };
 
     state.readTermInfo();
@@ -318,154 +369,253 @@ void State::run(void* arg)
     rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
 
-    const int stdoutfd = state.redirector.stdout();
-    const int stderrfd = state.redirector.stderr();
-
-    fd_set rdset;
-    int max = state.wakeupPipe[0];
-    if (STDIN_FILENO > max)
-        max = STDIN_FILENO;
-    if (stdoutfd > max)
-        max = stdoutfd;
-    if (stderrfd > max)
-        max = stderrfd;
-
     const auto stdoutfunc = std::bind(&Redirector::writeStdout, &state.redirector, std::placeholders::_1, std::placeholders::_2);
     const auto stderrfunc = std::bind(&Redirector::writeStderr, &state.redirector, std::placeholders::_1, std::placeholders::_2);
 
-    //uv_loop_t* loop = static_cast<uv_loop_t*>(arg);
-    bool pendingPause = false;
-    for (;;) {
-        // we need to wait on both wakeupPipe[0] and stdin
-        FD_ZERO(&rdset);
-        FD_SET(state.wakeupPipe[0], &rdset);
-        if (!state.paused)
-            FD_SET(STDIN_FILENO, &rdset);
-        FD_SET(stdoutfd, &rdset);
-        FD_SET(stderrfd, &rdset);
-        const int r = select(max + 1, &rdset, 0, 0, 0);
-        if (r <= 0) {
-            // boo
-            break;
+    struct RefScope
+    {
+        RefScope(IterateState is, int& r, std::function<void()>& ps, std::function<void()>& rs)
+            : ref(r), pause(ps), resume(rs)
+        {
+            // char buf[1024];
+            // snprintf(buf, 1024, "pre RefScope %zu\n", state.iterateState.size());
+            // state.redirector.writeStdout(buf);
+            icnt = state.iterateState.size();
+            lstate = !icnt ? State::StateNormal : state.iterateState.back();
+            state.iterateState.push_back(is);
+            if (ref++ == 1)
+                pause();
         }
-        if (FD_ISSET(state.wakeupPipe[0], &rdset)) {
-            // do stuff
-            // read everything on our pipe
-            char c, r;
-            bool stopped = false;
-            for (;;) {
-                EINTRWRAP(r, read(state.wakeupPipe[0], &c, 1));
-                if (r == -1)
-                    break;
-                if (r == 1) {
-                    switch (c) {
-                    case WakeupStop:
-                        stopped = true;
-                        break;
-                    case WakeupPause:
-                        pendingPause = true;
-                        break;
-                    case WakeupResume:
-                        if (state.paused) {
-                            state.paused = false;
-                            state.redirector.resume();
-                            const std::string& text = reprompt();
-                            rl_resize_terminal();
-                            state.readTermInfo();
-                            rl_callback_handler_install(text.c_str(), handler);
-                            state.restoreState();
-                            rl_set_prompt("");
-                            rl_redisplay();
-                            rl_set_prompt(text.c_str());
-                            rl_redisplay();
-                        }
-                        uv_async_send(&state.resumeAsync);
-                        break;
-                    case WakeupInt: {
-                        rl_callback_sigcleanup();
+        ~RefScope()
+        {
+            // char buf[1024];
+            // snprintf(buf, 1024, "pre ~RefScope %zu\n", state.iterateState.size() - 1);
+            // state.redirector.writeStdout(buf);
+            rlassert(!state.iterateState.empty());
+            state.lastIterateState = state.iterateState.back();
+            state.iterateState.pop_back();
+            rlassert(icnt == state.iterateState.size());
+            // printf("lstate %d, curstate %d\n", lstate, !icnt ? State::StateNormal : state.iterateState.back());
+            rlassert(lstate == (!icnt ? State::StateNormal : state.iterateState.back()));
 
-                        if (rl_undo_list)
-                            rl_free_undo_list ();
-                        rl_point = 0;
-                        rl_kill_text (rl_point, rl_end);
-                        rl_mark = 0;
-                        rl_clear_message();
-                        rl_crlf();
-                        rl_reset_line_state();
+            if (--ref == 1)
+                resume();
+        }
 
-                        const std::string& text = reprompt();
-                        rl_set_prompt("");
-                        rl_redisplay();
-                        rl_set_prompt(text.c_str());
-                        rl_redisplay();
-                        break; }
-                    case WakeupPrompt:
-                        if (!state.paused) {
-                            const std::string& text = reprompt();
-                            // I really have no idea why I have to clear the prompt and redisplay, but I do.
-                            rl_set_prompt("");
-                            rl_redisplay();
-                            rl_set_prompt(text.c_str());
-                            rl_redisplay();
+        bool paused() const { return ref > 1; };
+
+        enum RunMode { Now, Enqueue };
+        void run(RunMode mode, std::function<void()>&& func)
+        {
+            if (ref == 1) {
+                func();
+            } else if (mode == Enqueue) {
+                MutexLocker locker(&state.resumeMutex);
+                state.onResume.push_back(std::move(func));
+            }
+        }
+
+        int& ref;
+        std::function<void()>& pause;
+        std::function<void()>& resume;
+        size_t icnt;
+        IterateState lstate;
+    };
+
+    auto pauseRl = std::function<void()>([&reprompt, &handler]() {
+            state.saveState();
+            rl_callback_handler_remove();
+            state.redirector.pause();
+
+            MutexLocker locker(&state.resumeMutex);
+            state.onResume.push_back([&reprompt, &handler]() {
+                    rl_resize_terminal();
+                    state.readTermInfo();
+                    rl_callback_handler_install(state.prompt.text.c_str(), handler);
+                    state.restoreState();
+                    rlassert(state.iterateState.size() == 1);
+                    if (state.lastIterateState == State::StateForcePrompt) {
+                        reprompt(true /* force */);
+                    } else {
+                        if (!reprompt()) {
+                            state.iterate(State::StateForcePrompt);
                         }
-                        uv_async_send(&state.promptAsync);
+                    }
+                });
+        });
+
+    auto resumeRl = std::function<void()>([]() {
+            state.redirector.resume();
+
+            // go through all onresumes and run them
+            std::vector<std::function<void()> > resumes;
+            {
+                MutexLocker locker(&state.resumeMutex);
+                resumes = std::move(state.onResume);
+            }
+
+            for (auto r : resumes) {
+                r();
+            }
+        });
+
+    int ref = 0, pendingPause = 0;
+    state.iterate = [&ref, &pendingPause, &stdoutfunc, &stderrfunc, &reprompt, &pauseRl, &resumeRl](IterateState iterateState) {
+        RefScope scope(iterateState, ref, pauseRl, resumeRl);
+
+        const int stdoutfd = state.redirector.stdout();
+        const int stderrfd = state.redirector.stderr();
+
+        fd_set rdset;
+        int max = state.wakeupPipe[0];
+        if (STDIN_FILENO > max)
+            max = STDIN_FILENO;
+        if (stdoutfd > max)
+            max = stdoutfd;
+        if (stderrfd > max)
+            max = stderrfd;
+
+        //uv_loop_t* loop = static_cast<uv_loop_t*>(arg);
+
+        for (;;) {
+            if (pendingPause) {
+                if (!--pendingPause)
+                    uv_async_send(&state.pauseAsync);
+                state.iterate(State::StatePause);
+            }
+
+            // we need to wait on both wakeupPipe[0] and stdin
+            FD_ZERO(&rdset);
+            FD_SET(state.wakeupPipe[0], &rdset);
+            if (!scope.paused())
+                FD_SET(STDIN_FILENO, &rdset);
+            FD_SET(stdoutfd, &rdset);
+            FD_SET(stderrfd, &rdset);
+
+            if (state.stopped)
+                return;
+            const int r = select(max + 1, &rdset, 0, 0, 0);
+            if (r <= 0) {
+                // boo
+                break;
+            }
+
+            if (FD_ISSET(state.wakeupPipe[0], &rdset)) {
+                // do stuff
+                // read everything on our pipe
+                char c, r;
+                bool stopped = false;
+                for (;;) {
+                    EINTRWRAP(r, read(state.wakeupPipe[0], &c, 1));
+                    if (r == -1)
                         break;
-                    case WakeupWinch:
-                        rl_resize_terminal();
-                        state.readTermInfo();
-                        break;
+                    if (r == 1) {
+                        switch (c) {
+                        case WakeupStop:
+                            stopped = true;
+                            state.stopped = true;
+                            break;
+                        case WakeupPause:
+                            ++pendingPause;
+                            break;
+                        case WakeupResume:
+                            if (pendingPause) {
+                                if (!--pendingPause) {
+                                    uv_async_send(&state.pauseAsync);
+                                }
+                                uv_async_send(&state.resumeAsync);
+                            } else {
+                                uv_async_send(&state.resumeAsync);
+                                rlassert(ref > 1);
+                                return;
+                            }
+                            break;
+                        case WakeupRunResumes:
+                            scope.run(RefScope::Now, []() {
+                                    std::vector<std::function<void()> > resumes;
+                                    {
+                                        MutexLocker locker(&state.resumeMutex);
+                                        resumes = std::move(state.onResume);
+                                    }
+
+                                    for (auto r : resumes) {
+                                        r();
+                                    }
+                                });
+                            break;
+                        case WakeupInt:
+                            scope.run(RefScope::Now, [&reprompt]() {
+                                    rl_callback_sigcleanup();
+
+                                    if (rl_undo_list)
+                                        rl_free_undo_list ();
+                                    rl_point = 0;
+                                    rl_kill_text (rl_point, rl_end);
+                                    rl_mark = 0;
+                                    rl_clear_message();
+                                    rl_crlf();
+                                    rl_reset_line_state();
+
+                                    if (!reprompt()) {
+                                        state.iterate(State::StatePrompt);
+                                    }
+                                });
+                            break;
+                        case WakeupPrompt:
+                            scope.run(RefScope::Now, [&reprompt]() {
+                                    if (!reprompt()) {
+                                        state.iterate(State::StatePrompt);
+                                    }
+                                });
+                            uv_async_send(&state.promptAsync);
+                            break;
+                        case WakeupWinch:
+                            scope.run(RefScope::Enqueue, []() {
+                                    rl_resize_terminal();
+                                    state.readTermInfo();
+                                });
+                            break;
+                        }
                     }
                 }
+
+                if (stopped)
+                    break;
             }
-            if (stopped)
-                break;
-        }
-        if (FD_ISSET(stdoutfd, &rdset)) {
-            handleOut(stdoutfd, stdoutfunc);
-        }
-        if (FD_ISSET(stderrfd, &rdset)) {
-            handleOut(stderrfd, stderrfunc);
-        }
-        if (FD_ISSET(STDIN_FILENO, &rdset) && !state.paused) {
-            // read until we have nothing more to read
-            if (r == -1) {
-                // ugh
-                break;
+            if (FD_ISSET(stdoutfd, &rdset)) {
+                handleOut(stdoutfd, scope.paused(), stdoutfunc);
             }
-            bool error = false;
-            int rem;
-            for (;;) {
-                rl_callback_read_char();
-                // loop while we have more characters
-                if (ioctl(STDIN_FILENO, FIONREAD, &rem) == -1) {
+            if (FD_ISSET(stderrfd, &rdset)) {
+                handleOut(stderrfd, scope.paused(), stderrfunc);
+            }
+            if (FD_ISSET(STDIN_FILENO, &rdset) && !scope.paused()) {
+                // read until we have nothing more to read
+                if (r == -1) {
                     // ugh
-                    error = true;
                     break;
                 }
-                if (!rem)
+                bool error = false;
+                int rem;
+                for (;;) {
+                    rl_callback_read_char();
+                    // loop while we have more characters
+                    if (ioctl(STDIN_FILENO, FIONREAD, &rem) == -1) {
+                        // ugh
+                        error = true;
+                        break;
+                    }
+                    if (!rem)
+                        break;
+                }
+                if (error)
                     break;
             }
-            if (error)
-                break;
-        }
 
-        if (pendingPause) {
-            if (!state.paused) {
-                state.paused = true;
-                state.saveState();
-                rl_callback_handler_remove();
-                state.redirector.pause();
-            }
-            uv_async_send(&state.pauseAsync);
-            pendingPause = false;
-        }
-
-        {
-            MutexLocker locker(&state.mutex);
             if (state.stopped)
-                break;
+                return;
         }
-    }
+    };
+    state.iterate(State::StateNormal);
 
     rl_callback_handler_remove();
 }
@@ -496,11 +646,26 @@ NAN_METHOD(start) {
     {
         auto callback = [](const v8::FunctionCallbackInfo<v8::Value>& info) {
             if (info.Length() >= 1 && info[0]->IsString()) {
-                MutexLocker locker(&state.prompt.mutex);
-                state.prompt.text = *Nan::Utf8String(info[0]);
-                state.prompt.updated = true;
-                state.wakeup(State::WakeupPrompt);
+                {
+                    MutexLocker locker(&state.prompt.mutex);
+                    state.prompt.text = *Nan::Utf8String(info[0]);
+                }
+
+                MutexLocker locker(&state.resumeMutex);
+                state.onResume.push_back([]() {
+                        std::string prompt;
+                        {
+                            MutexLocker locker(&state.prompt.mutex);
+                            prompt = state.prompt.text;
+                        }
+                        rl_set_prompt("");
+                        rl_redisplay();
+                        rl_set_prompt(prompt.c_str());
+                        rl_redisplay();
+                    });
+
             }
+            state.wakeup(state.prompt.isWaiting() ? State::WakeupResume : State::WakeupRunResumes);
         };
         auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
         state.prompt.callback.Reset(Nan::Persistent<v8::Function>(cb.ToLocalChecked()));
@@ -539,7 +704,9 @@ NAN_METHOD(start) {
             MutexLocker locker(&state.completion.mutex);
             state.completion.results = results;
             //state.redirector.writeStdout("signaling\n");
-            state.completion.condition.signal();
+            // state.redirector.writeStdout("resume due to comp 1\n");
+
+            state.wakeup(State::WakeupResume);
         };
         auto cb = v8::Function::New(Nan::GetCurrentContext(), callback);
         state.completion.callback.Reset(Nan::Persistent<v8::Function>(cb.ToLocalChecked()));
@@ -595,7 +762,9 @@ NAN_METHOD(start) {
                 MutexLocker locker(&state.completion.mutex);
                 state.completion.results.clear();
                 //state.redirector.writeStdout("signaling\n");
-                state.completion.condition.signal();
+                // state.redirector.writeStdout("resume due to comp 2\n");
+
+                state.wakeup(State::WakeupResume);
             }
         } else if (async == &state.prompt.async) {
             bool hasPrompt = false;
@@ -605,6 +774,7 @@ NAN_METHOD(start) {
             auto p = state.prompt.function.Call(1, &cb);
             if (tryCatch.HasCaught()) {
                 logException("Prompt", tryCatch);
+                state.wakeup(State::WakeupResume);
             } else {
                 if (!p.IsEmpty() && p->IsString()) {
                     Nan::Utf8String str(p);
@@ -615,8 +785,10 @@ NAN_METHOD(start) {
             MutexLocker locker(&state.prompt.mutex);
             if (hasPrompt) {
                 state.prompt.text = text;
+                state.prompt.waiting = false;
+                state.wakeup(State::WakeupResume);
             }
-            state.prompt.condition.signal();
+            // state.redirector.writeStdout("resume due to prompt\n");
         } else if (async == &state.pauseAsync) {
             if (!state.pauseCb.empty()) {
                 auto cbs = std::move(state.pauseCb);
@@ -681,23 +853,8 @@ NAN_METHOD(start) {
 
 NAN_METHOD(pause) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
-        if (state.pausecnt > 0) {
-            if (state.pauseCb.empty()) {
-                ++state.pausecnt;
-                // fully paused, just call the function right away and bail out
-                auto func = v8::Local<v8::Function>::Cast(info[0]);
-                func->Call(func, 0, 0);
-                return;
-            }
-        }
-
         state.pauseCb.push_back(std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0])));
-        if (++state.pausecnt > 1) {
-            // we have a pending pause, don't wake up for pause again
-            return;
-        }
-
-        uv_signal_stop(&state.handleWinchSignal);
+        // state.redirector.writeStdout("pause due to real pause\n");
         state.wakeup(State::WakeupPause);
     } else {
         Nan::ThrowError("pause takes a function callback");
@@ -708,19 +865,13 @@ NAN_METHOD(resume) {
     if (info.Length() >= 1 && info[0]->IsFunction()) {
         state.resumeCb.push_back(std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[0])));
 
-        assert(state.pausecnt > 0);
-        if (--state.pausecnt > 0)
-            return;
-
         if (info.Length() >= 2 && info[1]->IsString()) {
             MutexLocker locker(&state.prompt.mutex);
             state.prompt.text = *Nan::Utf8String(info[1]);
             state.prompt.updated = true;
         }
+        // state.redirector.writeStdout("resume due to real resume\n");
 
-        uv_signal_start(&state.handleWinchSignal, [](uv_signal_t*, int) {
-                state.wakeup(State::WakeupWinch);
-            }, SIGWINCH);
         state.wakeup(State::WakeupResume);
     } else {
         Nan::ThrowError("resume takes a function callback");
