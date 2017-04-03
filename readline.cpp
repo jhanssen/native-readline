@@ -39,7 +39,7 @@ struct State
 
     Mutex mutex, resumeMutex;
     bool stopped;
-    std::vector<std::function<void()> > onResume;
+    std::vector<std::function<void()> > onResume, onNext;
 
     struct {
         Nan::Callback function;
@@ -100,6 +100,7 @@ struct State
         WakeupPause,
         WakeupResume,
         WakeupRunResumes,
+        WakeupRunNexts,
         WakeupPrompt,
         WakeupInt,
         WakeupWinch
@@ -569,6 +570,17 @@ void State::run(void* arg)
                                     }
                                 });
                             break;
+                        case WakeupRunNexts: {
+                            std::vector<std::function<void()> > nexts;
+                            {
+                                MutexLocker locker(&state.resumeMutex);
+                                nexts = std::move(state.onNext);
+                            }
+
+                            for (auto n : nexts) {
+                                n();
+                            }
+                            break; }
                         case WakeupInt:
                             scope.run(RefScope::Now, [&reprompt]() {
                                     rl_callback_sigcleanup();
@@ -1008,7 +1020,13 @@ NAN_METHOD(setOptions) {
         auto obj = v8::Handle<v8::Object>::Cast(info[0]);
         auto histMax = Nan::Get(obj, Nan::New("historyMax").ToLocalChecked()).ToLocalChecked();
         if (!histMax.IsEmpty() && histMax->IsNumber()) {
-            history_max_entries = static_cast<int>(v8::Handle<v8::Number>::Cast(histMax)->Value());
+            int max = static_cast<int>(v8::Handle<v8::Number>::Cast(histMax)->Value());
+
+            MutexLocker locker(&state.resumeMutex);
+            state.onNext.push_back([max]() {
+                    history_max_entries = max;
+                });
+            state.wakeup(State::WakeupRunNexts);
         }
     } else {
         Nan::ThrowError("setOptions takes an object");
@@ -1018,7 +1036,22 @@ NAN_METHOD(setOptions) {
 NAN_METHOD(addHistory) {
     if (info.Length() >= 1 && info[0]->IsString()) {
         Nan::Utf8String str(info[0]);
-        add_history(*str);
+        std::string nstr = *str;
+
+        MutexLocker locker(&state.resumeMutex);
+        state.onNext.push_back([nstr]() {
+                auto cur = current_history();
+                if (!cur) {
+                    // last one?
+                    cur = history_get(history_base + history_length - 1);
+                }
+                if (cur) {
+                    if (!strcmp(nstr.c_str(), cur->line))
+                        return;
+                }
+                add_history(nstr.c_str());
+            });
+        state.wakeup(State::WakeupRunNexts);
     } else {
         Nan::ThrowError("addHistory takes a string");
     }
@@ -1027,11 +1060,16 @@ NAN_METHOD(addHistory) {
 NAN_METHOD(readHistory) {
     if (info.Length() >= 1 && info[0]->IsString()) {
         Nan::Utf8String str(info[0]);
-        const int ret = read_history(*str);
-        if (!ret) {
-            using_history();
-        }
-        info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
+        std::string nstr = *str;
+
+        MutexLocker locker(&state.resumeMutex);
+        state.onNext.push_back([nstr]() {
+                const int ret = read_history(nstr.c_str());
+                if (!ret) {
+                    using_history();
+                }
+            });
+        state.wakeup(State::WakeupRunNexts);
     } else {
         Nan::ThrowError("readHistory takes a string");
     }
@@ -1040,15 +1078,24 @@ NAN_METHOD(readHistory) {
 NAN_METHOD(writeHistory) {
     if (info.Length() >= 1 && info[0]->IsString()) {
         Nan::Utf8String str(info[0]);
-        const int ret = write_history(*str);
-        info.GetReturnValue().Set(Nan::New<v8::Uint32>(ret));
+        std::string nstr = *str;
+
+        MutexLocker locker(&state.resumeMutex);
+        state.onNext.push_back([nstr]() {
+                write_history(nstr.c_str());
+            });
+        state.wakeup(State::WakeupRunNexts);
     } else {
         Nan::ThrowError("writeHistory takes a string");
     }
 }
 
 NAN_METHOD(clearHistory) {
-    clear_history();
+    MutexLocker locker(&state.resumeMutex);
+    state.onNext.push_back([]() {
+            clear_history();
+        });
+    state.wakeup(State::WakeupRunNexts);
 }
 
 NAN_MODULE_INIT(Initialize) {
