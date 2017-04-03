@@ -248,6 +248,14 @@ void State::readTermInfo()
 
 void State::forcePrompt(const std::string& prompt)
 {
+    std::string p = prompt;
+    {
+        MutexLocker locker(&state.prompt.mutex);
+        if (!state.prompt.over.empty()) {
+            p = state.prompt.over;
+        }
+    }
+
     // there really must be a better way of doing this. right? right?
     int savedPoint = rl_point;
     int savedMark = rl_mark;
@@ -257,7 +265,7 @@ void State::forcePrompt(const std::string& prompt)
     rl_redisplay();
 
     rl_replace_line(savedLine, 0);
-    rl_set_prompt(prompt.c_str());
+    rl_set_prompt(p.c_str());
     rl_point = savedPoint;
     rl_mark = savedMark;
     rl_redisplay();
@@ -382,6 +390,7 @@ void State::run(void* arg)
     rl_change_environment = 0;
     rl_outstream = state.redirector.stderrFile();
     rl_initialize();
+    rl_resize_terminal();
 
     rl_callback_handler_install(state.prompt.text.c_str(), handler);
     rl_attempted_completion_function = completer;
