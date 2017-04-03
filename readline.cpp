@@ -1047,6 +1047,10 @@ NAN_METHOD(writeHistory) {
     }
 }
 
+NAN_METHOD(clearHistory) {
+    clear_history();
+}
+
 NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, start);
     NAN_EXPORT(target, stop);
@@ -1064,6 +1068,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, addHistory);
     NAN_EXPORT(target, readHistory);
     NAN_EXPORT(target, writeHistory);
+    NAN_EXPORT(target, clearHistory);
 }
 
 NODE_MODULE(nativeReadline, Initialize)
