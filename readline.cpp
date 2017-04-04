@@ -137,7 +137,7 @@ struct State
 
 static State state;
 
-void logException(const char* msg, const Nan::TryCatch& tryCatch)
+static void logException(const char* msg, const Nan::TryCatch& tryCatch)
 {
     Nan::HandleScope scope;
     Nan::Utf8String str(tryCatch.Exception());
@@ -165,6 +165,91 @@ void logException(const char* msg, const Nan::TryCatch& tryCatch)
         }
     }
     fprintf(stderr, "---\n");
+}
+
+// handle utf-8
+#define ADVANCE_CHAR(_str, _strsize, _i)            \
+    do {                                            \
+        if (_i + 1 <= _strsize) {                   \
+            if (_str[++_i] & 0x10000000)            \
+                continue;                           \
+        } else if (_i == _strsize) {                \
+            ++_i;                                   \
+        }                                           \
+    }                                               \
+    while (0)
+
+// ugh, maybe we should delegate this to js?
+// also, how many times have I written this code now?
+int char_is_quoted(char* string, int eindex)
+{
+    enum State {
+        Normal,
+        Double,
+        Single,
+        Escape
+    };
+    bool wasEscaped = false;
+    std::vector<State> state;
+    state.push_back(Normal);
+    auto current = [&state]() {
+        return state.back();
+    };
+    auto maybePop = [&state](State s) {
+        if (state.back() == s) {
+            state.pop_back();
+            return true;
+        }
+        return false;
+    };
+    for (int i = 0; i <= eindex;) {
+        wasEscaped = current() == Escape;
+        switch (string[i]) {
+        case '\\':
+            switch (current()) {
+            case Escape:
+                state.pop_back();
+                break;
+            default:
+                state.push_back(Escape);
+                break;
+            }
+            break;
+        case '"':
+            switch (current()) {
+            case Normal:
+                state.push_back(Double);
+                break;
+            case Double:
+                state.pop_back();
+                break;
+            default:
+                break;
+            }
+            maybePop(Escape);
+            break;
+        case '\'':
+            switch (current()) {
+            case Normal:
+                state.push_back(Single);
+                break;
+            case Single:
+                state.pop_back();
+                break;
+            default:
+                break;
+            }
+            maybePop(Escape);
+            break;
+        default:
+            maybePop(Escape);
+            break;
+        }
+
+        ADVANCE_CHAR(string, eindex, i);
+    }
+    //printf("got state %d for %d (%c - '%s')\n", eindex, string[eindex], string);
+    return (!wasEscaped && current() == Normal) ? 0 : 1;
 }
 
 bool State::init()
@@ -390,6 +475,10 @@ void State::run(void* arg)
     rl_catch_sigwinch = 0;
     rl_change_environment = 0;
     rl_outstream = state.redirector.stderrFile();
+
+    rl_char_is_quoted_p = char_is_quoted;
+    rl_completer_quote_characters = "'\"";
+
     rl_initialize();
     rl_resize_terminal();
 
