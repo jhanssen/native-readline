@@ -519,7 +519,7 @@ void State::run(void* arg)
             icnt = state.iterateState.size();
             lstate = !icnt ? State::StateNormal : state.iterateState.back();
             state.iterateState.push_back(is);
-            if (ref++ == 1)
+            if (ref++ == 1 && is != StateCompletion)
                 pause();
         }
         ~RefScope()
@@ -534,7 +534,7 @@ void State::run(void* arg)
             // printf("lstate %d, curstate %d\n", lstate, !icnt ? State::StateNormal : state.iterateState.back());
             rlassert(lstate == (!icnt ? State::StateNormal : state.iterateState.back()));
 
-            if (--ref == 1)
+            if (--ref == 1 && state.lastIterateState != StateCompletion)
                 resume();
         }
 
