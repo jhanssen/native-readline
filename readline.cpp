@@ -5,6 +5,7 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <memory>
+#include <unordered_map>
 #include "utils.h"
 #include "Redirector.h"
 #include <errno.h>
@@ -122,6 +123,14 @@ struct State
     std::function<void(IterateState)> iterate;
 
     uv_signal_t handleWinchSignal;
+
+    struct {
+        std::string file;
+        uv_async_t async;
+    } history;
+
+    std::unordered_map<std::string, std::vector<std::unique_ptr<Nan::Callback> > > ons;
+    bool runOns(const std::string& type, std::vector<v8::Local<v8::Value> >& val, Nan::TryCatch& tryCatch);
 
     // pause state
     char* savedLine;
@@ -356,6 +365,19 @@ void State::forcePrompt(const std::string& prompt)
     rl_mark = savedMark;
     rl_redisplay();
     free(savedLine);
+}
+
+bool State::runOns(const std::string& type, std::vector<v8::Local<v8::Value> >& vals, Nan::TryCatch& tryCatch)
+{
+    auto& vec = ons[type];
+    if (vec.empty())
+        return true;
+    for (const auto& cb : vec) {
+        cb->Call(vals.size(), &vals[0]);
+        if (tryCatch.HasCaught())
+            return false;
+    }
+    return true;
 }
 
 static void handleOut(int fd, bool paused, const std::function<void(const char*, int)>& write)
@@ -974,6 +996,15 @@ NAN_METHOD(start) {
             if (tryCatch.HasCaught()) {
                 logException("Term", tryCatch);
             }
+        } else if (async == &state.history.async) {
+            std::vector<v8::Local<v8::Value> > values;
+            Nan::TryCatch tryCatch;
+            if (!state.runOns("historyAdded", values, tryCatch)) {
+                if (tryCatch.HasCaught()) {
+                    logException("Readline", tryCatch);
+                }
+            }
+
         } else {
         }
     };
@@ -981,6 +1012,7 @@ NAN_METHOD(start) {
     uv_async_init(uv_default_loop(), &state.readline.async, cb);
     uv_async_init(uv_default_loop(), &state.completion.async, cb);
     uv_async_init(uv_default_loop(), &state.prompt.async, cb);
+    uv_async_init(uv_default_loop(), &state.history.async, cb);
 
     uv_async_init(uv_default_loop(), &state.pauseAsync, cb);
     uv_async_init(uv_default_loop(), &state.resumeAsync, cb);
@@ -1127,8 +1159,12 @@ NAN_METHOD(addHistory) {
         Nan::Utf8String str(info[0]);
         std::string nstr = *str;
 
+        bool write = false;
+        if (info.Length() >= 2 && info[1]->IsBoolean())
+            write = v8::Local<v8::Boolean>::Cast(info[1])->Value();
+
         MutexLocker locker(&state.resumeMutex);
-        state.onNext.push_back([nstr]() {
+        state.onNext.push_back([nstr, write]() {
                 auto cur = current_history();
                 if (!cur) {
                     // last one?
@@ -1139,6 +1175,9 @@ NAN_METHOD(addHistory) {
                         return;
                 }
                 add_history(nstr.c_str());
+                if (write && !state.history.file.empty())
+                    write_history(state.history.file.c_str());
+                uv_async_send(&state.history.async);
             });
         state.wakeup(State::WakeupRunNexts);
     } else {
@@ -1153,6 +1192,7 @@ NAN_METHOD(readHistory) {
 
         MutexLocker locker(&state.resumeMutex);
         state.onNext.push_back([nstr]() {
+                state.history.file = nstr;
                 const int ret = read_history(nstr.c_str());
                 if (!ret) {
                     using_history();
@@ -1187,6 +1227,17 @@ NAN_METHOD(clearHistory) {
     state.wakeup(State::WakeupRunNexts);
 }
 
+NAN_METHOD(on) {
+    if (info.Length() > 1 && info[0]->IsString() && info[1]->IsFunction()) {
+        const std::string name = *Nan::Utf8String(info[0]);
+        state.ons[name].push_back(std::make_unique<Nan::Callback>(v8::Local<v8::Function>::Cast(info[1])));
+
+        // magic for term
+        if (name == "term")
+            state.wakeup(State::WakeupWinch);
+    }
+}
+
 NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, start);
     NAN_EXPORT(target, stop);
@@ -1200,6 +1251,7 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
     NAN_EXPORT(target, sigint);
+    NAN_EXPORT(target, on);
     NAN_EXPORT(target, setOptions);
     NAN_EXPORT(target, addHistory);
     NAN_EXPORT(target, readHistory);
