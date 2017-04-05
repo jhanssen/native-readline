@@ -62,14 +62,12 @@ struct State
     } prompt;
 
     struct {
-        Nan::Persistent<v8::Function> function;
         uv_async_t async;
 
         Queue<std::string> lines;
     } readline;
 
     struct {
-        Nan::Persistent<v8::Function> function;
         Nan::Persistent<v8::Function> callback;
         uv_async_t async;
 
@@ -777,20 +775,10 @@ NAN_METHOD(start) {
         Nan::ThrowError("Already started. Stop first");
         return;
     }
-    if (info.Length() < 2) {
-        Nan::ThrowError("Start needs two arguments");
-        return;
-    }
-    if (!info[0]->IsFunction() || !info[1]->IsFunction()) {
-        Nan::ThrowError("First and second arguments need to be functions");
-        return;
-    }
     if (!state.init()) {
         Nan::ThrowError("Unable to init readline");
         return;
     }
-    state.readline.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[0])));
-    state.completion.function.Reset(Nan::Persistent<v8::Function>(v8::Local<v8::Function>::Cast(info[1])));
 
     {
         auto callback = [](const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -820,9 +808,9 @@ NAN_METHOD(start) {
     }
     state.prompt.has = false;
     state.prompt.updated = false;
-    if (info.Length() > 2 && info[2]->IsFunction()) {
+    if (info.Length() > 0 && info[0]->IsFunction()) {
         state.prompt.has = true;
-        state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[2]));
+        state.prompt.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
 
         auto iso = info.GetIsolate();
         v8::Local<v8::Value> cb = v8::Local<v8::Function>::New(iso, state.prompt.callback);
@@ -864,19 +852,18 @@ NAN_METHOD(start) {
         v8::Isolate::Scope isolateScope(state.iso);
         Nan::HandleScope scope;
         if (async == &state.readline.async) {
-            auto iso = v8::Isolate::GetCurrent();
-            v8::Handle<v8::Function> f = v8::Local<v8::Function>::New(iso, state.readline.function);
-
             bool ok;
             for (;;) {
                 const std::string line = state.readline.lines.pop(&ok);
                 if (!ok)
                     break;
-                auto value = makeValue(line);
+                std::vector<v8::Local<v8::Value> > values;
+                values.push_back(makeValue(line));
                 Nan::TryCatch tryCatch;
-                f->Call(f, 1, &value);
-                if (tryCatch.HasCaught()) {
-                    logException("Readline", tryCatch);
+                if (!state.runOns("line", values, tryCatch)) {
+                    if (tryCatch.HasCaught()) {
+                        logException("Readline", tryCatch);
+                    }
                 }
             }
 
@@ -884,7 +871,6 @@ NAN_METHOD(start) {
             state.wakeup(State::WakeupPrompt);
         } else if (async == &state.completion.async) {
             auto iso = v8::Isolate::GetCurrent();
-            v8::Handle<v8::Function> f = v8::Local<v8::Function>::New(iso, state.completion.function);
             v8::Handle<v8::Function> cb = v8::Local<v8::Function>::New(iso, state.completion.callback);
 
             std::vector<v8::Handle<v8::Value> > values;
@@ -903,8 +889,7 @@ NAN_METHOD(start) {
 
             // ask js, pass a callback
             Nan::TryCatch tryCatch;
-            f->Call(f, values.size(), &values[0]);
-            if (tryCatch.HasCaught()) {
+            if (!state.runOns("complete", values, tryCatch)) {
                 logException("Completion", tryCatch);
 
                 MutexLocker locker(&state.completion.mutex);
@@ -976,9 +961,6 @@ NAN_METHOD(start) {
                 cb->Call(0, 0);
             }
         } else if (async == &state.term.async) {
-            if (state.term.function.IsEmpty())
-                return;
-
             auto iso = v8::Isolate::GetCurrent();
             v8::Local<v8::Object> data = v8::Object::New(iso);
 
@@ -988,12 +970,12 @@ NAN_METHOD(start) {
                 data->Set(makeValue("cols"), v8::Integer::New(state.iso, state.term.cols));
             }
 
-            v8::Local<v8::Value> val = data;
+            std::vector<v8::Local<v8::Value> > values;
+            values.push_back(data);
 
             // tell js
             Nan::TryCatch tryCatch;
-            state.term.function.Call(1, &val);
-            if (tryCatch.HasCaught()) {
+            if (!state.runOns("term", values, tryCatch))  {
                 logException("Term", tryCatch);
             }
         } else if (async == &state.history.async) {
@@ -1101,13 +1083,6 @@ NAN_METHOD(restorePrompt) {
     MutexLocker locker(&state.prompt.mutex);
     state.prompt.over.clear();
     state.wakeup(State::WakeupPrompt);
-}
-
-NAN_METHOD(setTerm) {
-    if (info.Length() >= 1 && info[0]->IsFunction()) {
-        state.term.function.Reset(v8::Local<v8::Function>::Cast(info[0]));
-        state.wakeup(State::WakeupWinch);
-    }
 }
 
 NAN_METHOD(stop) {
@@ -1246,7 +1221,6 @@ NAN_MODULE_INIT(Initialize) {
     NAN_EXPORT(target, setPrompt);
     NAN_EXPORT(target, overridePrompt);
     NAN_EXPORT(target, restorePrompt);
-    NAN_EXPORT(target, setTerm);
     NAN_EXPORT(target, prompt);
     NAN_EXPORT(target, log);
     NAN_EXPORT(target, error);
